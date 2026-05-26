@@ -126,7 +126,7 @@ export default function LandingPage() {
       </section>
 
       <footer style={{ textAlign: 'center', padding: '24px 16px', color: 'var(--ink-4)', fontSize: 12, borderTop: '1px solid var(--border-soft)' }}>
-        DocVault · Claude AI + Google Drive · 100% free
+        DocVault · Jeevs · Google Drive · 100% free
       </footer>
     </div>
   );
