@@ -12,13 +12,26 @@ export default function Navbar() {
     <>
       {/* Top bar */}
       <header className="top-nav">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{
-            width: 28, height: 28, background: 'var(--accent)',
-            borderRadius: 7, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14,
-          }}>🗄️</div>
-          <span style={{ fontWeight: 600, fontSize: 15, letterSpacing: '-.01em' }}>DocVault</span>
-        </div>
+        <div
+  onClick={() => navigate('/dashboard')}
+  style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
+>
+  {/* 🔥 Logo instead of emoji */}
+  <img
+    src="/logo.png"
+    alt="DocVault"
+    style={{
+      width: 28,
+      height: 28,
+      borderRadius: 7,
+      objectFit: 'cover',
+    }}
+  />
+
+  <span style={{ fontWeight: 600, fontSize: 15, letterSpacing: '-0.01em' }}>
+    DocVault
+  </span>
+</div>
 
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
           {auth?.user && (
