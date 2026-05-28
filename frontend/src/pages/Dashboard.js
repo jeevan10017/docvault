@@ -118,7 +118,7 @@ export default function Dashboard() {
   const [error,   setError]   = useState('');
   const [search,  setSearch]  = useState('');
   const [selectedDoc, setSelectedDoc] = useState(null);
-  const [activeTab, setActiveTab] = useState('folders'); // 'all' | 'folders' | 'recent'
+  const [activeTab, setActiveTab] = useState('all'); // 'all' | 'folders' | 'recent'
 
   useEffect(() => { fetchFiles(); }, []);
 

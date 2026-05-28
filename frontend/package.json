@@ -7,7 +7,9 @@
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.24.0",
     "react-dropzone": "^14.2.3",
-    "axios": "^1.7.2"
+    "axios": "^1.7.2",
+    "jspdf": "^2.5.1",
+    "pdf-lib": "^1.17.1"
   },
   "devDependencies": {
     "react-scripts": "5.0.1"

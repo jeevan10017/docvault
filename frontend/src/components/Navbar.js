@@ -2,17 +2,25 @@ import React from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 
-/* Mobile bottom nav + top bar */
-export default function Navbar() {
+export default function Navbar({ darkBg = false }) {
   const { auth, logout } = useAuth();
   const navigate = useNavigate();
   const { pathname } = useLocation();
 
+  const bg     = darkBg ? '#1a1a1a' : 'white';
+  const border = darkBg ? 'rgba(255,255,255,.1)' : 'var(--border-soft)';
+  const txtCol = darkBg ? 'rgba(255,255,255,.9)' : 'var(--ink)';
+  const mutCol = darkBg ? 'rgba(255,255,255,.45)' : 'var(--ink-4)';
+
   return (
     <>
       {/* Top bar */}
-      <header className="top-nav">
-        <div
+      <header style={{
+        display:'flex', alignItems:'center', justifyContent:'space-between',
+        padding:'12px 16px', background:bg, borderBottom:`1px solid ${border}`,
+        position:'sticky', top:0, zIndex:100, height:'var(--nav-h)',
+      }}>
+         <div
   onClick={() => navigate('/dashboard')}
   style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
 >
@@ -32,59 +40,51 @@ export default function Navbar() {
     DocVault
   </span>
 </div>
-
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-          {auth?.user && (
-            <img
-              src={auth.user.picture || ''}
-              alt={auth.user.name || ''}
-              onError={e => { e.target.style.display = 'none'; }}
-              style={{ width: 28, height: 28, borderRadius: '50%', border: '1.5px solid var(--border)' }}
-            />
+        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+          {auth?.user?.picture && (
+            <img src={auth.user.picture} alt="" onError={e => e.target.style.display='none'}
+              style={{ width:26, height:26, borderRadius:'50%', border:'1.5px solid rgba(255,255,255,.3)' }} />
           )}
-          <button
-            className="btn btn-ghost"
-            onClick={logout}
-            style={{ fontSize: 12, padding: '6px 10px', minHeight: 32, color: 'var(--ink-4)' }}
-          >
-            Sign out
-          </button>
+          <button onClick={logout} style={{
+            background:'transparent', border:`1px solid ${border}`, borderRadius:'var(--r)',
+            color:mutCol, fontSize:12, padding:'5px 10px', cursor:'pointer',
+            fontFamily:'var(--font)', minHeight:32,
+          }}>Sign out</button>
         </div>
       </header>
 
       {/* Bottom nav */}
-      <nav className="bottom-nav">
-        <button
-          className={`bottom-nav-item ${pathname === '/dashboard' ? 'active' : ''}`}
-          onClick={() => navigate('/dashboard')}
-        >
-          <span className="nav-icon">🏠</span>
-          <span>Home</span>
+      <nav style={{
+        position:'fixed', bottom:0, left:0, right:0,
+        height:'var(--bottom-bar-h)',
+        background:'white', borderTop:'1px solid var(--border-soft)',
+        display:'flex', alignItems:'stretch',
+        paddingBottom:'env(safe-area-inset-bottom, 0px)',
+        zIndex:100, boxShadow:'0 -4px 16px rgba(0,0,0,.06)',
+      }}>
+        {/* Home */}
+        <button className={`bottom-nav-item ${pathname === '/dashboard' ? 'active' : ''}`}
+          onClick={() => navigate('/dashboard')}>
+          <span className="nav-icon">🏠</span><span>Home</span>
         </button>
-        <button
-          className={`bottom-nav-item ${pathname === '/upload' ? 'active' : ''}`}
-          onClick={() => navigate('/upload')}
-          style={{ position: 'relative' }}
-        >
-          {/* Upload tab gets accent pill */}
+
+        {/* Scan — centre raised button */}
+        <button className={`bottom-nav-item ${pathname === '/scan' ? 'active' : ''}`}
+          onClick={() => navigate('/scan')} style={{ position:'relative' }}>
           <div style={{
-            width: 44, height: 44, borderRadius: '50%',
-            background: pathname === '/upload' ? 'var(--accent)' : 'var(--sand)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 22, marginBottom: 2, transition: 'background .15s',
-            marginTop: -14,
-            boxShadow: pathname === '/upload' ? '0 4px 12px rgba(204,120,92,.4)' : 'none',
-          }}>
-            <span style={{ fontSize: 20 }}>＋</span>
-          </div>
-          <span style={{ color: pathname === '/upload' ? 'var(--accent)' : 'var(--ink-4)' }}>Upload</span>
+            width:52, height:52, borderRadius:'50%', marginTop:-18,
+            background: pathname === '/scan' ? 'var(--accent)' : '#1a1a1a',
+            display:'flex', alignItems:'center', justifyContent:'center',
+            fontSize:22, boxShadow: '0 4px 14px rgba(0,0,0,.35)',
+            transition:'background .15s',
+          }}>📷</div>
+          <span style={{ color: pathname === '/scan' ? 'var(--accent)' : 'var(--ink-3)', marginTop:2 }}>Scan</span>
         </button>
-        <button
-          className={`bottom-nav-item ${pathname === '/search' ? 'active' : ''}`}
-          onClick={() => navigate('/dashboard')}
-        >
-          <span className="nav-icon">🔍</span>
-          <span>Search</span>
+
+        {/* Upload */}
+        <button className={`bottom-nav-item ${pathname === '/upload' ? 'active' : ''}`}
+          onClick={() => navigate('/upload')}>
+          <span className="nav-icon">☁️</span><span>Upload</span>
         </button>
       </nav>
     </>

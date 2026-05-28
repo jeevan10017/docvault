@@ -20,6 +20,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/auth', authRoutes);
 app.use('/upload', uploadRoutes);
 app.use('/drive', driveRoutes);
+app.use('/pdf',   require('./routes/pdf'));
 
 // Health check
 app.get('/health', (req, res) => {
