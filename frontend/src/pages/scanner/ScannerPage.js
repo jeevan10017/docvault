@@ -775,19 +775,17 @@ export default function ScannerPage() {
     if (!folder)        { setShowFolder(true); return; }
     setUploading(true); setError('');
 
-    try {
-      let blob, ext, mimeType;
+     try {
+      let blob, ext;
 
       if (outputFmt === 'pdf') {
         blob     = await buildPDF(pages);
         ext      = '.pdf';
-        mimeType = 'application/pdf';
       } else {
         // For image formats: if multi-page, build a PDF anyway (can't merge to one JPG/PNG)
         if (pages.length > 1) {
           blob     = await buildPDF(pages);
           ext      = '.pdf';
-          mimeType = 'application/pdf';
         } else {
           const dataUrl = pages[0].processed || pages[0].original;
           const q       = outputFmt === 'jpg' ? 'image/jpeg' : 'image/png';
