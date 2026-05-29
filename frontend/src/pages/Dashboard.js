@@ -120,9 +120,7 @@ export default function Dashboard() {
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [activeTab, setActiveTab] = useState('folders'); // 'all' | 'folders' | 'recent'
 
-  useEffect(() => { fetchFiles(); }, []);
-
-  async function fetchFiles() {
+  const fetchFiles = async () => {
     setLoading(true); setError('');
     try {
       const h = await getAuthHeader();
@@ -135,7 +133,9 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }
+  };
+
+  useEffect(() => { fetchFiles(); }, [fetchFiles, getAuthHeader]);
 
   const isFolder = f => f.mimeType === 'application/vnd.google-apps.folder';
   const allDocs    = files.filter(f => !isFolder(f));

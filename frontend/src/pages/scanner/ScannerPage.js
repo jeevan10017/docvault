@@ -88,8 +88,6 @@ async function rotateCW(dataUrl) {
 // the perspective transform. Produces smooth results without WebGL.
 async function perspectiveCrop(originalDataUrl, pts) {
   const src = await loadImg(originalDataUrl);
-  const SW  = src.naturalWidth  || src.width;
-  const SH  = src.naturalHeight || src.height;
 
   // Output dimensions: width = avg of top/bottom edge, height = avg of left/right edge
   const W = Math.round((
@@ -798,9 +796,8 @@ export default function ScannerPage() {
           canvas.width  = img.naturalWidth  || img.width;
           canvas.height = img.naturalHeight || img.height;
           canvas.getContext('2d').drawImage(img, 0, 0);
-          blob     = await new Promise(r => canvas.toBlob(r, q, 0.98));
-          ext      = outputFmt === 'jpg' ? '.jpg' : '.png';
-          mimeType = q;
+          blob = await new Promise(r => canvas.toBlob(r, q, 0.98));
+          ext = outputFmt === 'jpg' ? '.jpg' : '.png';
         }
       }
 
@@ -887,7 +884,7 @@ export default function ScannerPage() {
   }
 
   return (
-    <div style={{ height:'100dvh', height:'100vh', background:'#111',
+    <div style={{ height:'100dvh', background:'#111',
       display:'flex', flexDirection:'column', overflow:'hidden',
       paddingBottom:'var(--bottom-bar-h)' }}>
       <Navbar darkBg />
@@ -932,7 +929,6 @@ export default function ScannerPage() {
               style={{
                 maxWidth:'100%',
                 maxHeight:'calc(100dvh - 310px)',
-                maxHeight:'calc(100vh - 310px)',
                 objectFit:'contain', borderRadius:7,
                 boxShadow:'0 6px 32px rgba(0,0,0,.65)', display:'block',
               }} />
