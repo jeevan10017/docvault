@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { BASE } from '../utils/api';
 
@@ -16,7 +16,7 @@ export default function FolderSheet({ getAuthHeader, lastUsedFolderId, onSelect,
   const [saving,    setSaving]    = useState(false);
   const searchRef = useRef();
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true); setError('');
     try {
       const h = await getAuthHeader();
@@ -25,7 +25,7 @@ export default function FolderSheet({ getAuthHeader, lastUsedFolderId, onSelect,
     } catch (e) {
       setError(e.response?.data?.error || 'Could not load folders. Check your connection.');
     } finally { setLoading(false); }
-  };
+  }, [getAuthHeader]);
 
   useEffect(() => { load(); }, [load, getAuthHeader]);
   useEffect(() => { if (!loading) searchRef.current?.focus(); }, [loading]);
