@@ -20,26 +20,10 @@ export default function Navbar({ darkBg = false }) {
         padding:'12px 16px', background:bg, borderBottom:`1px solid ${border}`,
         position:'sticky', top:0, zIndex:100, height:'var(--nav-h)',
       }}>
-         <div
-  onClick={() => navigate('/dashboard')}
-  style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
->
-  {/* 🔥 Logo instead of emoji */}
-  <img
-    src="/logo.png"
-    alt="DocVault"
-    style={{
-      width: 28,
-      height: 28,
-      borderRadius: 7,
-      objectFit: 'cover',
-    }}
-  />
-
-  <span style={{ fontWeight: 600, fontSize: 15, letterSpacing: '-0.01em' }}>
-    DocVault
-  </span>
-</div>
+        <div style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer' }} onClick={() => navigate('/dashboard')}>
+          <div style={{ width:28, height:28, background:'var(--accent)', borderRadius:7, display:'flex', alignItems:'center', justifyContent:'center', fontSize:14 }}>🗄️</div>
+          <span style={{ fontWeight:600, fontSize:15, color:txtCol }}>DocVault</span>
+        </div>
         <div style={{ display:'flex', alignItems:'center', gap:8 }}>
           {auth?.user?.picture && (
             <img src={auth.user.picture} alt="" onError={e => e.target.style.display='none'}

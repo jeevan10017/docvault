@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import Navbar from '../../components/Navbar';
@@ -8,32 +8,42 @@ import { BASE } from '../../utils/api';
 import { getSequentialName, confirmUsed, sanitise } from '../../utils/naming';
 import { suggestName } from '../../utils/aiNaming';
 
-// ─── tiny helpers ──────────────────────────────────────────────────────────────
+// ─── Utilities ────────────────────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2, 9); }
 
+function loadImg(src) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload  = () => res(img);
+    img.onerror = () => rej(new Error('Image load failed'));
+    img.src = src;
+  });
+}
+
 function dataUrlToBlob(dataUrl) {
-  const [h, d] = dataUrl.split(',');
-  const mime   = h.match(/:(.*?);/)[1];
-  const bin    = atob(d);
-  const arr    = new Uint8Array(bin.length);
+  const [header, b64] = dataUrl.split(',');
+  const mime = header.match(/:(.*?);/)[1];
+  const bin  = atob(b64);
+  const arr  = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return new Blob([arr], { type: mime });
 }
 
-function loadImg(src) {
-  return new Promise((res, rej) => {
-    const i = new Image();
-    i.onload  = () => res(i);
-    i.onerror = rej;
-    i.src = src;
-  });
-}
+// ─── Image filter (applied on canvas at full res) ────────────────────────────
+async function applyFilterToDataUrl(dataUrl, filter) {
+  const img = await loadImg(dataUrl);
+  const c   = document.createElement('canvas');
+  c.width   = img.naturalWidth  || img.width;
+  c.height  = img.naturalHeight || img.height;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(img, 0, 0);
 
-// ─── Image filters via Canvas ──────────────────────────────────────────────────
-function applyFilter(canvas, filter) {
-  const ctx = canvas.getContext('2d');
-  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const d   = img.data;
+  if (filter === 'original') return c.toDataURL('image/jpeg', 0.98);
+
+  const id = ctx.getImageData(0, 0, c.width, c.height);
+  const d  = id.data;
+
   if (filter === 'bw') {
     for (let i = 0; i < d.length; i += 4) {
       const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
@@ -41,284 +51,308 @@ function applyFilter(canvas, filter) {
     }
   } else if (filter === 'enhance') {
     for (let i = 0; i < d.length; i += 4) {
-      d[i]   = Math.min(255, Math.max(0, (d[i]   - 128) * 1.45 + 148));
-      d[i+1] = Math.min(255, Math.max(0, (d[i+1] - 128) * 1.45 + 148));
-      d[i+2] = Math.min(255, Math.max(0, (d[i+2] - 128) * 1.45 + 148));
+      d[i]   = Math.min(255, Math.max(0, (d[i]   - 128) * 1.5 + 148));
+      d[i+1] = Math.min(255, Math.max(0, (d[i+1] - 128) * 1.5 + 148));
+      d[i+2] = Math.min(255, Math.max(0, (d[i+2] - 128) * 1.5 + 148));
     }
   } else if (filter === 'magic') {
+    // High-contrast grayscale — "scanned document" look
     for (let i = 0; i < d.length; i += 4) {
       let g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-      g = g > 185 ? 255 : g < 70 ? 0 : (g - 70) / 115 * 255;
+      g = g > 190 ? 255 : g < 60 ? 0 : ((g - 60) / 130) * 255;
       d[i] = d[i+1] = d[i+2] = Math.min(255, g);
     }
   }
-  ctx.putImageData(img, 0, 0);
-  return canvas.toDataURL('image/jpeg', 0.93);
+
+  ctx.putImageData(id, 0, 0);
+  return c.toDataURL('image/jpeg', 0.98);
 }
 
+// ─── Rotate CW at full resolution ────────────────────────────────────────────
 async function rotateCW(dataUrl) {
   const img = await loadImg(dataUrl);
+  const W   = img.naturalWidth  || img.width;
+  const H   = img.naturalHeight || img.height;
   const c   = document.createElement('canvas');
-  c.width   = img.height; c.height = img.width;
+  c.width   = H; c.height = W;
   const ctx = c.getContext('2d');
-  ctx.translate(c.width / 2, c.height / 2);
+  ctx.translate(H / 2, W / 2);
   ctx.rotate(Math.PI / 2);
-  ctx.drawImage(img, -img.width / 2, -img.height / 2);
-  return c.toDataURL('image/jpeg', 0.93);
+  ctx.drawImage(img, -W / 2, -H / 2);
+  return c.toDataURL('image/jpeg', 0.98);
 }
 
-/**
- * Perspective-correct crop using 4 corner points.
- * pts: [{x,y}, {x,y}, {x,y}, {x,y}] in image-space pixels (TL,TR,BR,BL)
- */
-async function perspectiveCrop(dataUrl, pts) {
-  const src  = await loadImg(dataUrl);
-  const w    = Math.max(
-    Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y),
+// ─── Perspective warp — proper strip-based approach, no pixelation ────────────
+// Uses canvas strip rendering: draws the source image N times, each clipped
+// to a thin horizontal strip, each time applying a slight x-shear to simulate
+// the perspective transform. Produces smooth results without WebGL.
+async function perspectiveCrop(originalDataUrl, pts) {
+  const src = await loadImg(originalDataUrl);
+  const SW  = src.naturalWidth  || src.width;
+  const SH  = src.naturalHeight || src.height;
+
+  // Output dimensions: width = avg of top/bottom edge, height = avg of left/right edge
+  const W = Math.round((
+    Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y) +
     Math.hypot(pts[2].x - pts[3].x, pts[2].y - pts[3].y)
-  );
-  const h    = Math.max(
-    Math.hypot(pts[3].x - pts[0].x, pts[3].y - pts[0].y),
+  ) / 2);
+  const H = Math.round((
+    Math.hypot(pts[3].x - pts[0].x, pts[3].y - pts[0].y) +
     Math.hypot(pts[2].x - pts[1].x, pts[2].y - pts[1].y)
-  );
-  const W    = Math.round(w), H = Math.round(h);
-  const dst  = [{ x:0,y:0 }, { x:W,y:0 }, { x:W,y:H }, { x:0,y:H }];
-  const c    = document.createElement('canvas');
-  c.width    = W; c.height = H;
-  const ctx  = c.getContext('2d');
+  ) / 2);
 
-  // Simple bilinear approximation (no WebGL needed)
-  const temp = document.createElement('canvas');
-  temp.width = src.naturalWidth || src.width;
-  temp.height = src.naturalHeight || src.height;
-  temp.getContext('2d').drawImage(src, 0, 0);
+  const out = document.createElement('canvas');
+  out.width  = W;
+  out.height = H;
+  const ctx  = out.getContext('2d');
 
-  // Subdivide into a grid and map each cell
-  const STEPS = 80;
-  for (let yi = 0; yi <= STEPS; yi++) {
-    for (let xi = 0; xi <= STEPS; xi++) {
-      const u = xi / STEPS, v = yi / STEPS;
-      // Bilinear interpolate source position
-      const sx = (1-u)*(1-v)*pts[0].x + u*(1-v)*pts[1].x + u*v*pts[2].x + (1-u)*v*pts[3].x;
-      const sy = (1-u)*(1-v)*pts[0].y + u*(1-v)*pts[1].y + u*v*pts[2].y + (1-u)*v*pts[3].y;
-      // Destination position
-      const dx = u * W, dy = v * H;
-      const px = temp.getContext('2d').getImageData(Math.round(sx), Math.round(sy), 1, 1).data;
-      ctx.fillStyle = `rgba(${px[0]},${px[1]},${px[2]},${px[3]/255})`;
-      ctx.fillRect(Math.round(dx), Math.round(dy), Math.ceil(W/STEPS)+1, Math.ceil(H/STEPS)+1);
-    }
+  // For each output row, compute the source scanline by lerping between
+  // left and right edges at fraction v = row/H
+  const ROWS = H;
+  for (let row = 0; row < ROWS; row++) {
+    const v = row / ROWS;
+
+    // Left edge point at this v
+    const lx = pts[0].x + (pts[3].x - pts[0].x) * v;
+    const ly = pts[0].y + (pts[3].y - pts[0].y) * v;
+    // Right edge point at this v
+    const rx = pts[1].x + (pts[2].x - pts[1].x) * v;
+    const ry = pts[1].y + (pts[2].y - pts[1].y) * v;
+
+    // Source row y (mid of the horizontal span)
+    const srcY = (ly + ry) / 2;
+    // Horizontal stretch in source
+    const srcW = Math.hypot(rx - lx, ry - ly);
+    const srcX = lx;
+
+    // Draw one horizontal strip: clip to output row, then drawImage with transform
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, row, W, 1);
+    ctx.clip();
+
+    // Rotate the source strip to align with horizontal in dest
+    const angle = Math.atan2(ry - ly, rx - lx);
+    ctx.translate(0, row);
+    ctx.rotate(-angle);
+    ctx.drawImage(
+      src,
+      srcX, srcY - 0.5,           // source x, y
+      Math.max(1, srcW), 1,       // source width, height (1px strip)
+      0, 0,                       // dest x, y
+      W, 1                        // dest width, height
+    );
+    ctx.restore();
   }
-  return c.toDataURL('image/jpeg', 0.93);
+
+  return out.toDataURL('image/jpeg', 0.98);
 }
 
-// ─── CropEditor — 4-corner handles + perspective warp ─────────────────────────
+// ─── Crop Editor ─────────────────────────────────────────────────────────────
 function CropEditor({ page, onDone, onCancel }) {
-  const canvasRef  = useRef();
-  const [imgSize,  setImgSize]  = useState({ w: 1, h: 1 });
-  const [dispSize, setDispSize] = useState({ w: 300, h: 400 });
-  const [pts,      setPts]      = useState(null); // [{x,y}×4] in IMAGE space
-  const [dragging, setDragging] = useState(null); // index 0-3
+  const [imgSize,  setImgSize]  = useState(null);
+  const [dispSize, setDispSize] = useState(null);
+  const [pts,      setPts]      = useState(null);
+  const [dragging, setDragging] = useState(null);
   const [applying, setApplying] = useState(false);
   const containerRef = useRef();
+  const svgRef       = useRef();
 
-  // Load image and set initial corner points
   useEffect(() => {
-    const src = page.processed || page.original;
+    const src = page.original; // always crop from original for max quality
     loadImg(src).then(img => {
       const IW = img.naturalWidth  || img.width;
       const IH = img.naturalHeight || img.height;
       setImgSize({ w: IW, h: IH });
 
-      // Default corners = 10% inset from image edges
-      const m = 0.05;
+      // Fit inside available screen space
+      const vw = window.innerWidth;
+      const vh = window.innerHeight - 160; // top bar + hint
+      const scale = Math.min((vw - 24) / IW, vh / IH, 1);
+      const DW = Math.round(IW * scale);
+      const DH = Math.round(IH * scale);
+      setDispSize({ w: DW, h: DH });
+
+      // Default: 8% margin inset from actual image edges
+      const M = 0.08;
       setPts([
-        { x: IW*m,     y: IH*m },
-        { x: IW*(1-m), y: IH*m },
-        { x: IW*(1-m), y: IH*(1-m) },
-        { x: IW*m,     y: IH*(1-m) },
+        { x: IW * M,       y: IH * M },
+        { x: IW * (1 - M), y: IH * M },
+        { x: IW * (1 - M), y: IH * (1 - M) },
+        { x: IW * M,       y: IH * (1 - M) },
       ]);
+    }).catch(() => { onDone(page.processed || page.original); });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-      // Fit image into container
-      const container = containerRef.current;
-      if (container) {
-        const cw = container.clientWidth || window.innerWidth;
-        // Available height: screen - toolbar - handle area - bottom bar
-        const ch = window.innerHeight - 180;
-        const ratio = Math.min(cw / IW, ch / IH);
-        setDispSize({ w: Math.round(IW * ratio), h: Math.round(IH * ratio) });
-      }
-    });
-  }, [page]);
+  const toDisp = (ix, iy) => ({
+    x: (ix / (imgSize?.w || 1)) * (dispSize?.w || 1),
+    y: (iy / (imgSize?.h || 1)) * (dispSize?.h || 1),
+  });
 
-  // Convert display coords → image coords
-  function toImg(dx, dy) {
-    const scale = imgSize.w / dispSize.w;
-    return { x: dx * scale, y: dy * scale };
-  }
-  // Convert image coords → display coords
-  function toDisp(ix, iy) {
-    const scale = dispSize.w / imgSize.w;
-    return { x: ix * scale, y: iy * scale };
-  }
+  const toImgCoords = (dx, dy) => ({
+    x: (dx / (dispSize?.w || 1)) * (imgSize?.w || 1),
+    y: (dy / (dispSize?.h || 1)) * (imgSize?.h || 1),
+  });
 
-  function getEventPos(e, canvas) {
-    const rect = canvas.getBoundingClientRect();
-    const touch = e.touches ? e.touches[0] : e;
+  function getPos(e) {
+    const svg  = svgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+    const rect = svg.getBoundingClientRect();
+    const src  = e.touches ? e.touches[0] : e;
     return {
-      x: touch.clientX - rect.left,
-      y: touch.clientY - rect.top,
+      x: Math.max(0, Math.min(dispSize.w, src.clientX - rect.left)),
+      y: Math.max(0, Math.min(dispSize.h, src.clientY - rect.top)),
     };
   }
 
-  function onPointerDown(e, idx) {
+  function onDown(e, i) {
     e.preventDefault();
-    setDragging(idx);
+    e.stopPropagation();
+    setDragging(i);
   }
 
-  function onPointerMove(e) {
-    if (dragging === null || !pts) return;
+  function onMove(e) {
+    if (dragging === null) return;
     e.preventDefault();
-    const canvas = canvasRef.current;
-    const pos    = getEventPos(e, canvas);
-    // Clamp to image display bounds
-    const clampedX = Math.max(0, Math.min(dispSize.w, pos.x));
-    const clampedY = Math.max(0, Math.min(dispSize.h, pos.y));
-    const imgPos   = toImg(clampedX, clampedY);
-    setPts(prev => prev.map((p, i) => i === dragging ? imgPos : p));
+    const p = getPos(e);
+    setPts(prev => prev.map((pt, i) => i === dragging ? toImgCoords(p.x, p.y) : pt));
   }
 
-  function onPointerUp() { setDragging(null); }
+  function onUp() { setDragging(null); }
 
-  async function applyAndDone() {
+  async function apply() {
     setApplying(true);
     try {
-      const src    = page.original; // always crop from original
-      const result = await perspectiveCrop(src, pts);
-      onDone(result);
-    } catch (e) {
-      console.error('Crop error:', e);
-      onDone(page.processed); // fallback: no crop
+      const cropped = await perspectiveCrop(page.original, pts);
+      // Re-apply filter after crop if not original
+      if (page.filter && page.filter !== 'original') {
+        const filtered = await applyFilterToDataUrl(cropped, page.filter);
+        onDone(filtered);
+      } else {
+        onDone(cropped);
+      }
+    } catch (err) {
+      console.error('Crop failed:', err);
+      onDone(page.processed || page.original); // graceful fallback
     }
     setApplying(false);
   }
 
-  if (!pts) return (
-    <div style={{ position:'fixed', inset:0, background:'#111', zIndex:400, display:'flex', alignItems:'center', justifyContent:'center' }}>
-      <div className="spin" style={{ width:32, height:32, border:'2px solid rgba(255,255,255,.2)', borderTopColor:'white', borderRadius:'50%' }} />
-    </div>
-  );
+  if (!pts || !imgSize || !dispSize) {
+    return (
+      <div style={{ position:'fixed', inset:0, background:'#111', zIndex:400,
+        display:'flex', alignItems:'center', justifyContent:'center' }}>
+        <div className="spin" style={{ width:36, height:36,
+          border:'2px solid rgba(255,255,255,.15)', borderTopColor:'white', borderRadius:'50%' }} />
+      </div>
+    );
+  }
 
-  const HANDLE_R = 20; // px, touch-friendly
+  const dp = pts.map(p => toDisp(p.x, p.y));
+  const polyPts = dp.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
 
   return (
-    <div style={{ position:'fixed', inset:0, background:'#0d0d0d', zIndex:400, display:'flex', flexDirection:'column', userSelect:'none' }}>
+    <div style={{ position:'fixed', inset:0, background:'#0a0a0a', zIndex:400,
+      display:'flex', flexDirection:'column', touchAction:'none', userSelect:'none' }}>
+
       {/* Top bar */}
-      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'12px 16px', flexShrink:0 }}>
-        <button onClick={onCancel}
-          style={{ background:'none', border:'none', color:'rgba(255,255,255,.7)', fontSize:15, cursor:'pointer', padding:'8px', minWidth:44, minHeight:44, fontFamily:'var(--font)' }}>
-          Cancel
-        </button>
-        <span style={{ color:'white', fontSize:14, fontWeight:500 }}>Adjust crop</span>
-        <button onClick={applyAndDone} disabled={applying}
-          style={{ background:'var(--accent)', border:'none', color:'white', fontSize:14, fontWeight:600, cursor:'pointer', padding:'8px 18px', borderRadius:99, minHeight:40, fontFamily:'var(--font)' }}>
-          {applying ? '…' : 'Apply'}
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between',
+        padding:'12px 16px', paddingTop:'max(12px, env(safe-area-inset-top))', flexShrink:0 }}>
+        <button onClick={onCancel} style={{
+          background:'none', border:'none', color:'rgba(255,255,255,.7)',
+          fontSize:15, cursor:'pointer', padding:'8px 12px', minWidth:64, minHeight:44,
+          fontFamily:'var(--font)', textAlign:'left',
+        }}>Cancel</button>
+        <span style={{ color:'white', fontSize:14, fontWeight:600 }}>Adjust Crop</span>
+        <button onClick={apply} disabled={applying} style={{
+          background: applying ? 'rgba(204,120,92,.5)' : 'var(--accent)',
+          border:'none', color:'white', fontSize:14, fontWeight:700,
+          cursor: applying ? 'default' : 'pointer',
+          padding:'9px 20px', borderRadius:99, minHeight:44, minWidth:64,
+          fontFamily:'var(--font)',
+        }}>
+          {applying ? '…' : 'Done'}
         </button>
       </div>
 
-      {/* Canvas area */}
-      <div ref={containerRef} style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center', position:'relative', overflow:'hidden' }}>
+      {/* Image + SVG overlay */}
+      <div ref={containerRef} style={{ flex:1, display:'flex', alignItems:'center',
+        justifyContent:'center', overflow:'hidden', position:'relative' }}>
         <div style={{ position:'relative', width:dispSize.w, height:dispSize.h }}>
-          {/* Image */}
-          <img
-            src={page.processed || page.original} alt="crop"
-            style={{ width:dispSize.w, height:dispSize.h, display:'block', userSelect:'none', pointerEvents:'none' }}
-          />
 
-          {/* SVG overlay — polygon + grid */}
+          {/* The actual image */}
+          <img src={page.processed || page.original} alt="crop"
+            style={{ width:dispSize.w, height:dispSize.h, display:'block',
+              pointerEvents:'none', userSelect:'none' }} />
+
+          {/* SVG overlay */}
           <svg
-            ref={canvasRef}
+            ref={svgRef}
             width={dispSize.w} height={dispSize.h}
-            style={{ position:'absolute', top:0, left:0, cursor:'crosshair', touchAction:'none' }}
-            onMouseMove={onPointerMove}  onMouseUp={onPointerUp}
-            onTouchMove={onPointerMove}  onTouchEnd={onPointerUp}
+            style={{ position:'absolute', top:0, left:0, touchAction:'none', overflow:'visible' }}
+            onMouseMove={onMove}  onMouseUp={onUp}  onMouseLeave={onUp}
+            onTouchMove={onMove}  onTouchEnd={onUp}
           >
-            {/* Dark mask outside crop area */}
+            {/* Dark outside mask — using feComposite to cut out the poly */}
             <defs>
-              <clipPath id="crop-clip">
-                <polygon points={pts.map(p => `${toDisp(p.x,p.y).x},${toDisp(p.x,p.y).y}`).join(' ')} />
-              </clipPath>
+              <mask id="crop-mask">
+                <rect width="100%" height="100%" fill="white" />
+                <polygon points={polyPts} fill="black" />
+              </mask>
             </defs>
-            {/* Full dark overlay */}
-            <rect width={dispSize.w} height={dispSize.h} fill="rgba(0,0,0,.52)" />
-            {/* Cut-out the crop region */}
-            <polygon
-              points={pts.map(p => `${toDisp(p.x,p.y).x},${toDisp(p.x,p.y).y}`).join(' ')}
-              fill="rgba(0,0,0,0)"
-              style={{ mixBlendMode:'destination-out' }}
-            />
-            {/* Border */}
-            <polygon
-              points={pts.map(p => `${toDisp(p.x,p.y).x},${toDisp(p.x,p.y).y}`).join(' ')}
-              fill="none" stroke="rgba(255,255,255,.9)" strokeWidth="1.5"
-            />
+            <rect width="100%" height="100%" fill="rgba(0,0,0,.6)" mask="url(#crop-mask)" />
 
-            {/* ── Rule-of-thirds grid lines (dashed) ── */}
-            {(() => {
-              const dp = pts.map(p => toDisp(p.x, p.y));
-              const lines = [];
-              for (let t of [1/3, 2/3]) {
-                // Horizontal: lerp between left and right edges
-                const lx = dp[0].x + (dp[3].x - dp[0].x) * t;
-                const ly = dp[0].y + (dp[3].y - dp[0].y) * t;
-                const rx = dp[1].x + (dp[2].x - dp[1].x) * t;
-                const ry = dp[1].y + (dp[2].y - dp[1].y) * t;
-                lines.push(<line key={`h${t}`} x1={lx} y1={ly} x2={rx} y2={ry} stroke="rgba(255,255,255,.35)" strokeWidth="1" strokeDasharray="5,5" />);
+            {/* Crop border */}
+            <polygon points={polyPts} fill="none" stroke="white" strokeWidth="1.8" />
 
-                // Vertical: lerp between top and bottom edges
-                const tx = dp[0].x + (dp[1].x - dp[0].x) * t;
-                const ty = dp[0].y + (dp[1].y - dp[0].y) * t;
-                const bx = dp[3].x + (dp[2].x - dp[3].x) * t;
-                const by = dp[3].y + (dp[2].y - dp[3].y) * t;
-                lines.push(<line key={`v${t}`} x1={tx} y1={ty} x2={bx} y2={by} stroke="rgba(255,255,255,.35)" strokeWidth="1" strokeDasharray="5,5" />);
-              }
-              return lines;
-            })()}
+            {/* Rule-of-thirds grid inside crop */}
+            {[1/3, 2/3].map(t => {
+              const top_l = { x: dp[0].x + (dp[3].x - dp[0].x)*t, y: dp[0].y + (dp[3].y - dp[0].y)*t };
+              const top_r = { x: dp[1].x + (dp[2].x - dp[1].x)*t, y: dp[1].y + (dp[2].y - dp[1].y)*t };
+              const left  = { x: dp[0].x + (dp[1].x - dp[0].x)*t, y: dp[0].y + (dp[1].y - dp[0].y)*t };
+              const right = { x: dp[3].x + (dp[2].x - dp[3].x)*t, y: dp[3].y + (dp[2].y - dp[3].y)*t };
+              return (
+                <g key={t}>
+                  <line x1={top_l.x} y1={top_l.y} x2={top_r.x} y2={top_r.y}
+                    stroke="rgba(255,255,255,.4)" strokeWidth="0.8" strokeDasharray="5,4" />
+                  <line x1={left.x}  y1={left.y}  x2={right.x} y2={right.y}
+                    stroke="rgba(255,255,255,.4)" strokeWidth="0.8" strokeDasharray="5,4" />
+                </g>
+              );
+            })}
 
-            {/* ── Corner handles ── */}
-            {pts.map((p, i) => {
-              const dp = toDisp(p.x, p.y);
-              const cornerAngles = [
-                { // TL — L-shape open to bottom-right
-                  lines: [{ dx:16,dy:0 }, { dx:0,dy:16 }]
-                },
-                { // TR — open to bottom-left
-                  lines: [{ dx:-16,dy:0 }, { dx:0,dy:16 }]
-                },
-                { // BR — open to top-left
-                  lines: [{ dx:-16,dy:0 }, { dx:0,dy:-16 }]
-                },
-                { // BL — open to top-right
-                  lines: [{ dx:16,dy:0 }, { dx:0,dy:-16 }]
-                },
-              ];
-              const c = cornerAngles[i];
+            {/* Corner handles */}
+            {dp.map((p, i) => {
+              const arms = [
+                [[1,0],[0,1]],  // TL
+                [[-1,0],[0,1]], // TR
+                [[-1,0],[0,-1]],// BR
+                [[1,0],[0,-1]], // BL
+              ][i];
+              const L = 22;
               return (
                 <g key={i}
-                  onMouseDown={e => onPointerDown(e, i)}
-                  onTouchStart={e => onPointerDown(e, i)}
-                  style={{ cursor:'grab' }}>
-                  {/* Invisible large touch target */}
-                  <circle cx={dp.x} cy={dp.y} r={HANDLE_R} fill="transparent" />
-                  {/* L-shaped corner bracket */}
-                  {c.lines.map((l, li) => (
-                    <line key={li}
-                      x1={dp.x} y1={dp.y}
-                      x2={dp.x + l.dx} y2={dp.y + l.dy}
-                      stroke="white" strokeWidth="3" strokeLinecap="round"
-                    />
+                  onMouseDown={e => onDown(e, i)}
+                  onTouchStart={e => onDown(e, i)}
+                  style={{ cursor:'grab', touchAction:'none' }}>
+                  {/* Large invisible hit target */}
+                  <circle cx={p.x} cy={p.y} r={28} fill="transparent" />
+                  {/* Shadow for contrast */}
+                  {arms.map(([dx,dy], ai) => (
+                    <line key={'s'+ai}
+                      x1={p.x} y1={p.y} x2={p.x+dx*L} y2={p.y+dy*L}
+                      stroke="rgba(0,0,0,.5)" strokeWidth="5" strokeLinecap="round" />
+                  ))}
+                  {/* White L-arms */}
+                  {arms.map(([dx,dy], ai) => (
+                    <line key={ai}
+                      x1={p.x} y1={p.y} x2={p.x+dx*L} y2={p.y+dy*L}
+                      stroke="white" strokeWidth="3" strokeLinecap="round" />
                   ))}
                   {/* Corner dot */}
-                  <circle cx={dp.x} cy={dp.y} r={5} fill="white" />
+                  <circle cx={p.x} cy={p.y} r={6} fill="white"
+                    stroke="rgba(0,0,0,.3)" strokeWidth="1.5" />
                 </g>
               );
             })}
@@ -326,331 +360,464 @@ function CropEditor({ page, onDone, onCancel }) {
         </div>
       </div>
 
-      {/* Hint */}
-      <p style={{ textAlign:'center', color:'rgba(255,255,255,.4)', fontSize:12, padding:'10px', flexShrink:0 }}>
-        Drag the corners to adjust the document boundary
+      <p style={{ textAlign:'center', color:'rgba(255,255,255,.35)',
+        fontSize:12, padding:'10px 16px 16px', flexShrink:0, fontFamily:'var(--font)' }}>
+        Drag corners to align with document edges
       </p>
     </div>
   );
 }
 
-// ─── CameraCapture — Adobe Scan style ────────────────────────────────────────
+// ─── Camera Capture ───────────────────────────────────────────────────────────
 function CameraCapture({ onCapture, onClose }) {
-  const videoRef  = useRef();
-  const [ready,   setReady]  = useState(false);
-  const [flash,   setFlash]  = useState(false);
-  const [error,   setError]  = useState('');
-  const [torch,   setTorch]  = useState(false);
-  const streamRef = useRef();
+  const videoRef  = useRef(null);
+  const streamRef = useRef(null);
+  const [ready,  setReady]  = useState(false);
+  const [flash,  setFlash]  = useState(false);
+  const [error,  setError]  = useState('');
+  const [torch,  setTorch]  = useState(false);
 
   useEffect(() => {
-    let mounted = true;
-    navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'environment' },
-        width:  { ideal: 3840, min: 1280 },
-        height: { ideal: 2160, min: 720 },
-      },
-      audio: false,
-    }).then(s => {
-      if (!mounted) { s.getTracks().forEach(t => t.stop()); return; }
-      streamRef.current = s;
-      if (videoRef.current) videoRef.current.srcObject = s;
-      setReady(true);
-    }).catch(e => setError('Camera: ' + e.message));
+    let active = true;
+
+    async function start() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width:  { ideal: 4096 },
+            height: { ideal: 3072 },
+          },
+          audio: false,
+        });
+        if (!active) { stream.getTracks().forEach(t => t.stop()); return; }
+        streamRef.current = stream;
+
+        // Wait for video element to exist in DOM
+        const video = videoRef.current;
+        if (video) {
+          video.srcObject = stream;
+          video.onloadedmetadata = () => {
+            video.play().then(() => { if (active) setReady(true); }).catch(() => {
+              if (active) setReady(true); // try anyway
+            });
+          };
+        }
+      } catch (e) {
+        if (!active) return;
+        const msg = e.name === 'NotAllowedError'
+          ? 'Camera permission denied. Please allow camera access in browser settings.'
+          : e.name === 'NotFoundError'
+          ? 'No camera found on this device.'
+          : 'Camera error: ' + e.message;
+        setError(msg);
+      }
+    }
+
+    start();
     return () => {
-      mounted = false;
+      active = false;
       streamRef.current?.getTracks().forEach(t => t.stop());
     };
   }, []);
 
+  // Also set srcObject when videoRef mounts (handles timing edge cases)
+  const setVideoRef = (el) => {
+    videoRef.current = el;
+    if (el && streamRef.current && !el.srcObject) {
+      el.srcObject = streamRef.current;
+    }
+  };
+
   function shoot() {
     const v = videoRef.current;
-    if (!v) return;
-    // Flash animation
+    if (!v || !v.videoWidth) return;
     setFlash(true);
-    setTimeout(() => setFlash(false), 180);
-
+    setTimeout(() => setFlash(false), 200);
     const c = document.createElement('canvas');
     c.width  = v.videoWidth;
     c.height = v.videoHeight;
     c.getContext('2d').drawImage(v, 0, 0);
-    onCapture(c.toDataURL('image/jpeg', 0.96));
+    // Use max quality JPEG — PDF quality depends on this
+    onCapture(c.toDataURL('image/jpeg', 0.98));
   }
 
   function toggleTorch() {
     const track = streamRef.current?.getVideoTracks()[0];
     if (!track) return;
-    const newVal = !torch;
-    track.applyConstraints({ advanced: [{ torch: newVal }] })
-      .then(() => setTorch(newVal))
-      .catch(() => {}); // torch not supported on this device
+    const next = !torch;
+    track.applyConstraints({ advanced: [{ torch: next }] })
+      .then(() => setTorch(next))
+      .catch(() => {});
   }
 
   return (
-    <div style={{ position:'fixed', inset:0, background:'#000', zIndex:300, display:'flex', flexDirection:'column', userSelect:'none' }}>
+    <div style={{ position:'fixed', inset:0, zIndex:300, background:'#000',
+      display:'flex', flexDirection:'column', userSelect:'none', touchAction:'none' }}>
 
-      {/* Flash overlay */}
-      {flash && <div style={{ position:'absolute', inset:0, background:'white', zIndex:10, opacity:.7, pointerEvents:'none' }} />}
+      {/* Flash */}
+      {flash && (
+        <div style={{ position:'absolute', inset:0, background:'white',
+          opacity:.8, zIndex:20, pointerEvents:'none',
+          animation:'fadeInBg .2s ease' }} />
+      )}
 
-      {/* Top controls */}
+      {/* Viewfinder video */}
+      <video
+        ref={setVideoRef}
+        autoPlay playsInline muted
+        style={{ position:'absolute', inset:0, width:'100%', height:'100%',
+          objectFit:'cover', display:'block' }}
+      />
+
+      {/* Top gradient + controls */}
       <div style={{
-        position:'absolute', top:0, left:0, right:0, zIndex:5,
+        position:'absolute', top:0, left:0, right:0, zIndex:10,
+        background:'linear-gradient(180deg,rgba(0,0,0,.65) 0%,transparent 100%)',
+        padding:'max(env(safe-area-inset-top,12px),12px) 12px 24px',
         display:'flex', alignItems:'center', justifyContent:'space-between',
-        padding:'env(safe-area-inset-top, 12px) 16px 12px',
-        background:'linear-gradient(to bottom, rgba(0,0,0,.6) 0%, transparent 100%)',
       }}>
-        <button onClick={onClose}
-          style={{ width:44, height:44, display:'flex', alignItems:'center', justifyContent:'center', background:'none', border:'none', color:'white', fontSize:26, cursor:'pointer' }}>
-          ×
-        </button>
-        <span style={{ color:'rgba(255,255,255,.8)', fontSize:13, fontFamily:'var(--font)', fontWeight:500 }}>
-          Position document in frame
-        </span>
-        <button onClick={toggleTorch}
-          style={{ width:44, height:44, display:'flex', alignItems:'center', justifyContent:'center', background:'none', border:'none', color: torch ? '#FFD060' : 'white', fontSize:22, cursor:'pointer' }}>
-          {torch ? '🔦' : '⚡'}
-        </button>
+        <button onClick={onClose} style={{
+          width:48, height:48, display:'flex', alignItems:'center', justifyContent:'center',
+          background:'rgba(0,0,0,.35)', backdropFilter:'blur(4px)',
+          border:'none', borderRadius:99, color:'white', fontSize:22,
+          cursor:'pointer', WebkitTapHighlightColor:'transparent',
+        }}>✕</button>
+
+        <div style={{ color:'rgba(255,255,255,.8)', fontSize:13,
+          fontFamily:'var(--font)', fontWeight:500, textAlign:'center' }}>
+          {error ? '' : 'Position document in frame'}
+        </div>
+
+        <button onClick={toggleTorch} style={{
+          width:48, height:48, display:'flex', alignItems:'center', justifyContent:'center',
+          background: torch ? 'rgba(255,208,60,.2)' : 'rgba(0,0,0,.35)',
+          backdropFilter:'blur(4px)',
+          border: torch ? '1.5px solid rgba(255,208,60,.6)' : 'none',
+          borderRadius:99, color: torch ? '#FFD060' : 'white', fontSize:20,
+          cursor:'pointer', WebkitTapHighlightColor:'transparent',
+        }}>⚡</button>
       </div>
 
-      {/* Error */}
+      {/* Error state */}
       {error && (
-        <div style={{ position:'absolute', top:'50%', left:'50%', transform:'translate(-50%,-50%)', zIndex:5, textAlign:'center' }}>
-          <p style={{ color:'#f87', fontSize:14, padding:'20px' }}>{error}</p>
-          <button onClick={onClose} style={{ color:'white', fontSize:14, background:'none', border:'1px solid white', borderRadius:8, padding:'8px 16px', cursor:'pointer', fontFamily:'var(--font)' }}>Go back</button>
+        <div style={{ position:'absolute', inset:0, zIndex:15,
+          display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
+          padding:'32px', textAlign:'center' }}>
+          <div style={{ fontSize:48, marginBottom:16 }}>📷</div>
+          <p style={{ color:'white', fontSize:15, marginBottom:8, fontFamily:'var(--font)' }}>{error}</p>
+          <button onClick={onClose} style={{
+            marginTop:16, padding:'12px 24px', borderRadius:99,
+            background:'white', color:'#333', border:'none', fontSize:14,
+            cursor:'pointer', fontFamily:'var(--font)', fontWeight:600,
+          }}>Go Back</button>
         </div>
       )}
 
-      {/* Viewfinder — full screen */}
-      <video
-        ref={videoRef} autoPlay playsInline muted
-        style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover' }}
-      />
+      {/* Document corner guides */}
+      {!error && (
+        <div style={{ position:'absolute', inset:0, zIndex:8, pointerEvents:'none' }}>
+          {[
+            { top:'14%',   left:'8%',   borderTop:'2.5px solid rgba(255,255,255,.75)', borderLeft:'2.5px solid rgba(255,255,255,.75)' },
+            { top:'14%',   right:'8%',  borderTop:'2.5px solid rgba(255,255,255,.75)', borderRight:'2.5px solid rgba(255,255,255,.75)' },
+            { bottom:'24%',left:'8%',   borderBottom:'2.5px solid rgba(255,255,255,.75)', borderLeft:'2.5px solid rgba(255,255,255,.75)' },
+            { bottom:'24%',right:'8%',  borderBottom:'2.5px solid rgba(255,255,255,.75)', borderRight:'2.5px solid rgba(255,255,255,.75)' },
+          ].map((s, i) => (
+            <div key={i} style={{ position:'absolute', width:32, height:32, ...s }} />
+          ))}
+        </div>
+      )}
 
-      {/* Corner brackets overlay — document guide */}
-      <div style={{ position:'absolute', inset:0, zIndex:4, pointerEvents:'none' }}>
-        {/* Create four corner brackets at ~15% inset */}
-        {[
-          { top:'15%', left:'10%',  borderTop:'2px solid rgba(255,255,255,.7)', borderLeft:'2px solid rgba(255,255,255,.7)' },
-          { top:'15%', right:'10%', borderTop:'2px solid rgba(255,255,255,.7)', borderRight:'2px solid rgba(255,255,255,.7)' },
-          { bottom:'26%', left:'10%',  borderBottom:'2px solid rgba(255,255,255,.7)', borderLeft:'2px solid rgba(255,255,255,.7)' },
-          { bottom:'26%', right:'10%', borderBottom:'2px solid rgba(255,255,255,.7)', borderRight:'2px solid rgba(255,255,255,.7)' },
-        ].map((s, i) => (
-          <div key={i} style={{ position:'absolute', width:28, height:28, ...s }} />
-        ))}
-      </div>
-
-      {/* ── Bottom shutter area — large, thumb-reachable ── */}
-      {ready && (
+      {/* Bottom shutter — large, low, thumb-friendly */}
+      {ready && !error && (
         <div style={{
-          position:'absolute', bottom:0, left:0, right:0, zIndex:5,
-          paddingBottom:'calc(env(safe-area-inset-bottom, 0px) + 24px)',
-          paddingTop:20,
-          background:'linear-gradient(to top, rgba(0,0,0,.75) 0%, transparent 100%)',
-          display:'flex', flexDirection:'column', alignItems:'center', gap:16,
+          position:'absolute', bottom:0, left:0, right:0, zIndex:10,
+          paddingBottom:'max(env(safe-area-inset-bottom,0px),24px)',
+          paddingTop:24,
+          background:'linear-gradient(0deg,rgba(0,0,0,.7) 0%,transparent 100%)',
+          display:'flex', flexDirection:'column', alignItems:'center', gap:14,
         }}>
-          {/* Instruction */}
-          <p style={{ color:'rgba(255,255,255,.55)', fontSize:12, fontFamily:'var(--font)' }}>
-            Tap to capture
-          </p>
+          <span style={{ color:'rgba(255,255,255,.5)', fontSize:12,
+            fontFamily:'var(--font)', letterSpacing:'.04em' }}>
+            TAP TO CAPTURE
+          </span>
 
-          {/* Shutter button — CamScanner/Adobe Scan style */}
+          {/* Outer ring + inner disc — Adobe Scan style */}
           <button
             onClick={shoot}
-            onTouchStart={e => e.currentTarget.style.transform = 'scale(.92)'}
-            onTouchEnd={e => { e.currentTarget.style.transform = 'scale(1)'; shoot(); }}
             style={{
-              width: 76, height: 76,
-              borderRadius: '50%',
-              border: '4px solid white',
-              background: 'transparent',
-              cursor: 'pointer',
-              position: 'relative',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              WebkitTapHighlightColor: 'transparent',
-              transition: 'transform .1s',
-            }}>
-            {/* Inner white disc */}
+              width:80, height:80, borderRadius:'50%',
+              border:'3px solid rgba(255,255,255,.9)',
+              background:'transparent', cursor:'pointer',
+              display:'flex', alignItems:'center', justifyContent:'center',
+              WebkitTapHighlightColor:'transparent', touchAction:'manipulation',
+              transition:'transform .12s, border-color .12s',
+              position:'relative',
+            }}
+            onTouchStart={e => { e.currentTarget.style.transform='scale(.9)'; e.currentTarget.style.borderColor='var(--accent)'; }}
+            onTouchEnd={e => { e.currentTarget.style.transform='scale(1)'; e.currentTarget.style.borderColor='rgba(255,255,255,.9)'; }}
+          >
             <div style={{
-              width: 58, height: 58, borderRadius: '50%',
-              background: 'white',
+              width:62, height:62, borderRadius:'50%',
+              background:'white',
+              boxShadow:'0 2px 12px rgba(0,0,0,.4)',
             }} />
           </button>
+        </div>
+      )}
+
+      {/* "Waiting for camera" state */}
+      {!ready && !error && (
+        <div style={{ position:'absolute', inset:0, zIndex:15, display:'flex',
+          alignItems:'center', justifyContent:'center' }}>
+          <div style={{ textAlign:'center' }}>
+            <div className="spin" style={{ width:36, height:36,
+              border:'2px solid rgba(255,255,255,.15)', borderTopColor:'white',
+              borderRadius:'50%', margin:'0 auto 12px' }} />
+            <p style={{ color:'rgba(255,255,255,.5)', fontSize:13,
+              fontFamily:'var(--font)' }}>Starting camera…</p>
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-// ─── Page thumbnail strip ──────────────────────────────────────────────────────
-function PageStrip({ pages, selected, onSelect, onDelete, onAdd }) {
+// ─── Page Thumbnail Strip ─────────────────────────────────────────────────────
+function PageStrip({ pages, selected, onSelect, onCrop, onDelete, onAdd }) {
   return (
     <div style={{
-      display:'flex', alignItems:'center', gap:8,
-      padding:'8px 12px', background:'rgba(0,0,0,.85)',
-      overflowX:'auto', WebkitOverflowScrolling:'touch',
-      scrollbarWidth:'none', flexShrink:0,
+      display:'flex', alignItems:'center', gap:8, padding:'8px 12px',
+      background:'rgba(0,0,0,.88)', overflowX:'auto', overflowY:'visible',
+      WebkitOverflowScrolling:'touch', scrollbarWidth:'none', flexShrink:0,
     }}>
       {pages.map((p, i) => (
-        <div key={p.id} onClick={() => onSelect(i)}
-          style={{
-            position:'relative', minWidth:48, width:48, height:64, borderRadius:5,
-            border:`2.5px solid ${selected === i ? 'var(--accent)' : 'rgba(255,255,255,.2)'}`,
-            overflow:'hidden', cursor:'pointer', flexShrink:0,
-            transition:'border-color .15s',
-          }}>
-          <img src={p.processed || p.original} alt={`p${i+1}`}
-            style={{ width:'100%', height:'100%', objectFit:'cover' }} />
-          <div style={{
-            position:'absolute', bottom:0, left:0, right:0,
-            background:'rgba(0,0,0,.6)', color:'white', fontSize:9,
-            textAlign:'center', padding:'2px 0', fontFamily:'var(--font)',
-          }}>{i + 1}</div>
-          <button
-            onClick={e => { e.stopPropagation(); onDelete(i); }}
+        <div key={p.id} style={{ position:'relative', flexShrink:0 }}>
+          <div
+            onClick={() => onSelect(i)}
             style={{
-              position:'absolute', top:2, right:2, width:18, height:18,
-              borderRadius:'50%', background:'rgba(200,0,0,.8)', border:'none',
+              width:50, height:66, borderRadius:6, overflow:'hidden', cursor:'pointer',
+              border:`2.5px solid ${selected===i ? 'var(--accent)' : 'rgba(255,255,255,.18)'}`,
+              transition:'border-color .15s',
+            }}>
+            <img src={p.processed || p.original} alt={`p${i+1}`}
+              style={{ width:'100%', height:'100%', objectFit:'cover' }} />
+            <div style={{
+              position:'absolute', bottom:0, left:0, right:0,
+              background:'rgba(0,0,0,.65)', color:'white',
+              fontSize:9, textAlign:'center', padding:'2px 0',
+              fontFamily:'var(--font)',
+            }}>{i+1}</div>
+          </div>
+          {/* Crop shortcut on thumb */}
+          <button onClick={() => onCrop(i)}
+            style={{
+              position:'absolute', top:-6, left:-6, width:22, height:22,
+              borderRadius:'50%', background:'rgba(40,40,40,.9)',
+              border:'1.5px solid rgba(255,255,255,.3)',
               color:'white', fontSize:11, cursor:'pointer',
               display:'flex', alignItems:'center', justifyContent:'center',
-              WebkitTapHighlightColor:'transparent',
+              WebkitTapHighlightColor:'transparent', zIndex:2,
+            }}>✂</button>
+          {/* Delete */}
+          <button onClick={() => onDelete(i)}
+            style={{
+              position:'absolute', top:-6, right:-6, width:22, height:22,
+              borderRadius:'50%', background:'rgba(180,30,30,.9)',
+              border:'1.5px solid rgba(255,255,255,.2)',
+              color:'white', fontSize:13, cursor:'pointer',
+              display:'flex', alignItems:'center', justifyContent:'center',
+              WebkitTapHighlightColor:'transparent', zIndex:2,
             }}>×</button>
         </div>
       ))}
       <button onClick={onAdd} style={{
-        minWidth:48, width:48, height:64, borderRadius:5,
-        border:'2px dashed rgba(255,255,255,.25)', background:'rgba(255,255,255,.06)',
+        minWidth:50, width:50, height:66, borderRadius:6, flexShrink:0,
+        border:'2px dashed rgba(255,255,255,.22)', background:'rgba(255,255,255,.05)',
         cursor:'pointer', display:'flex', flexDirection:'column',
-        alignItems:'center', justifyContent:'center', gap:2, flexShrink:0,
+        alignItems:'center', justifyContent:'center', gap:2,
         WebkitTapHighlightColor:'transparent',
       }}>
-        <span style={{ fontSize:20, color:'rgba(255,255,255,.6)', lineHeight:1 }}>＋</span>
-        <span style={{ fontSize:9, color:'rgba(255,255,255,.4)', fontFamily:'var(--font)' }}>Add</span>
+        <span style={{ fontSize:22, color:'rgba(255,255,255,.5)', lineHeight:1 }}>＋</span>
+        <span style={{ fontSize:9, color:'rgba(255,255,255,.35)', fontFamily:'var(--font)' }}>Add</span>
       </button>
     </div>
   );
 }
 
-// ─── Main ScannerPage ──────────────────────────────────────────────────────────
-export default function ScannerPage() {
-  const { getAuthHeader }   = useAuth();
-  const navigate            = useNavigate();
-  const fileInputRef        = useRef();
+// ─── Build PDF with centred, high-quality images ──────────────────────────────
+async function buildPDF(pages) {
+  const { jsPDF } = await import('jspdf');
 
-  const [pages, setPages]           = useState([]);
-  const [selected, setSelected]     = useState(0);
+  // A4 in points (72 dpi base)
+  const PW = 595.28, PH = 841.89;
+  const MARGIN = 20; // pt
+
+  const pdf = new jsPDF({ orientation:'portrait', unit:'pt', format:'a4', compress:true });
+
+  for (let i = 0; i < pages.length; i++) {
+    if (i > 0) pdf.addPage();
+
+    const dataUrl = pages[i].processed || pages[i].original;
+    const img     = await loadImg(dataUrl);
+    const IW      = img.naturalWidth  || img.width;
+    const IH      = img.naturalHeight || img.height;
+
+    const maxW = PW - MARGIN * 2;
+    const maxH = PH - MARGIN * 2;
+
+    // Fit image inside page keeping aspect ratio
+    const scale = Math.min(maxW / IW, maxH / IH);
+    const drawW = IW * scale;
+    const drawH = IH * scale;
+
+    // Centre on page
+    const x = (PW - drawW) / 2;
+    const y = (PH - drawH) / 2;
+
+    // Use PNG for lossless or JPEG at max quality
+    const fmt = dataUrl.startsWith('data:image/png') ? 'PNG' : 'JPEG';
+    pdf.addImage(dataUrl, fmt, x, y, drawW, drawH, undefined, 'NONE');
+  }
+
+  return pdf.output('blob');
+}
+
+// ─── Main ScannerPage ─────────────────────────────────────────────────────────
+export default function ScannerPage() {
+  const { getAuthHeader } = useAuth();
+  const navigate          = useNavigate();
+  const fileInputRef      = useRef();
+
+  const [pages,      setPages]      = useState([]);
+  const [selected,   setSelected]   = useState(0);
   const [showCamera, setShowCamera] = useState(false);
-  const [cropPage,  setCropPage]    = useState(null);  // page object to crop
+  const [cropIndex,  setCropIndex]  = useState(null); // which page to crop
   const [showFolder, setShowFolder] = useState(false);
-  const [docName, setDocName]       = useState('');    // blank = sequential
-  const [folder, setFolder]         = useState(() => {
+  const [docName,    setDocName]    = useState('');
+  const [outputFmt,  setOutputFmt]  = useState('pdf'); // 'pdf' | 'jpg' | 'png'
+  const [folder,     setFolder]     = useState(() => {
     try { return JSON.parse(localStorage.getItem('dv_last_folder')); } catch { return null; }
   });
-  const [uploading, setUploading]   = useState(false);
+  const [uploading,  setUploading]  = useState(false);
   const [uploadDone, setUploadDone] = useState(null);
-  const [error, setError]           = useState('');
+  const [error,      setError]      = useState('');
 
-  // ── Handle files from gallery ──
+  function addPage(original) {
+    const p = { id: uid(), original, processed: original, filter: 'original' };
+    setPages(prev => { const next = [...prev, p]; return next; });
+    setSelected(prev => prev); // keep current (new page shown in strip)
+    return p;
+  }
+
   function handleFiles(fileList) {
     Array.from(fileList)
       .filter(f => f.type.startsWith('image/') || f.type === 'application/pdf')
       .forEach(file => {
         const reader = new FileReader();
-        reader.onload = e => {
-          const id = uid();
-          setPages(prev => [...prev, {
-            id, original: e.target.result, processed: e.target.result,
-            filter: 'original',
-          }]);
-          setSelected(prev => prev + 1);
-        };
+        reader.onload = e => addPage(e.target.result);
         reader.readAsDataURL(file);
       });
   }
 
   function handleCamera(dataUrl) {
-    const id = uid();
-    setPages(prev => [...prev, { id, original: dataUrl, processed: dataUrl, filter: 'original' }]);
-    setSelected(prev => Math.max(0, prev));
+    const p = addPage(dataUrl);
     setShowCamera(false);
-    // Auto-open crop editor on camera shot
-    setCropPage({ id, original: dataUrl, processed: dataUrl, filter: 'original' });
+    // Auto-open crop editor immediately after capture
+    setPages(prev => {
+      const idx = prev.findIndex(x => x.id === p.id);
+      setCropIndex(idx >= 0 ? idx : prev.length - 1);
+      return prev;
+    });
+    // fallback if page not found yet
+    setTimeout(() => {
+      setPages(prev => {
+        const idx = prev.findIndex(x => x.id === p.id);
+        if (idx >= 0) setCropIndex(idx);
+        return prev;
+      });
+    }, 50);
   }
 
-  function applyCrop(pageId, croppedDataUrl) {
-    setPages(prev => prev.map(p =>
-      p.id === pageId ? { ...p, processed: croppedDataUrl } : p
-    ));
-    setCropPage(null);
+  function applyCrop(idx, croppedUrl) {
+    setPages(prev => prev.map((p, i) => i === idx ? { ...p, processed: croppedUrl } : p));
+    setCropIndex(null);
   }
 
   function deletePage(idx) {
     setPages(prev => prev.filter((_, i) => i !== idx));
-    setSelected(s => Math.max(0, s >= idx ? s - 1 : s));
+    setSelected(s => Math.max(0, s > idx ? s-1 : Math.min(s, pages.length-2)));
+    if (cropIndex === idx) setCropIndex(null);
   }
 
-  async function applyFilterToPage(idx, filterName) {
+  async function applyFilter(idx, filter) {
     const page = pages[idx];
-    const img  = await loadImg(page.original);
-    const c    = document.createElement('canvas');
-    c.width    = img.width; c.height = img.height;
-    c.getContext('2d').drawImage(img, 0, 0);
-    const result = applyFilter(c, filterName);
-    setPages(prev => prev.map((p, i) => i === idx ? { ...p, processed: result, filter: filterName } : p));
+    // Apply to the cropped/processed version but record filter for re-apply after crop
+    const result = await applyFilterToDataUrl(page.processed, filter);
+    setPages(prev => prev.map((p, i) => i === idx ? { ...p, processed: result, filter } : p));
   }
 
-  async function rotateCurrentPage() {
-    const page    = pages[selected];
-    const rotated = await rotateCW(page.processed);
-    setPages(prev => prev.map((p, i) => i === selected ? { ...p, processed: rotated } : p));
+  async function rotate(idx) {
+    const page   = pages[idx];
+    const result = await rotateCW(page.processed);
+    setPages(prev => prev.map((p, i) => i === idx ? { ...p, processed: result } : p));
   }
 
   function movePage(from, dir) {
     const to = from + dir;
     if (to < 0 || to >= pages.length) return;
     setPages(prev => {
-      const arr = [...prev];
-      [arr[from], arr[to]] = [arr[to], arr[from]];
-      return arr;
+      const a = [...prev]; [a[from], a[to]] = [a[to], a[from]]; return a;
     });
     setSelected(to);
   }
 
-  // ── Build PDF and upload ──
-  async function buildAndUpload() {
-    if (!pages.length) { setError('Add at least one page.'); return; }
-    if (!folder)       { setShowFolder(true); return; }
-
+  async function saveAndUpload() {
+    if (!pages.length)  { setError('Add at least one page.'); return; }
+    if (!folder)        { setShowFolder(true); return; }
     setUploading(true); setError('');
+
     try {
-      const { jsPDF } = await import('jspdf');
-      const pdf = new jsPDF({ orientation:'portrait', unit:'pt', format:'a4' });
-      const W = 595.28, H = 841.89;
+      let blob, ext, mimeType;
 
-      for (let i = 0; i < pages.length; i++) {
-        if (i > 0) pdf.addPage();
-        const dataUrl = pages[i].processed || pages[i].original;
-        const img     = await loadImg(dataUrl);
-        const ratio   = Math.min(W / img.width, H / img.height);
-        const w = img.width * ratio, h = img.height * ratio;
-        pdf.addImage(dataUrl, 'JPEG', (W-w)/2, (H-h)/2, w, h, undefined, 'FAST');
+      if (outputFmt === 'pdf') {
+        blob     = await buildPDF(pages);
+        ext      = '.pdf';
+        mimeType = 'application/pdf';
+      } else {
+        // For image formats: if multi-page, build a PDF anyway (can't merge to one JPG/PNG)
+        if (pages.length > 1) {
+          blob     = await buildPDF(pages);
+          ext      = '.pdf';
+          mimeType = 'application/pdf';
+        } else {
+          const dataUrl = pages[0].processed || pages[0].original;
+          const q       = outputFmt === 'jpg' ? 'image/jpeg' : 'image/png';
+          const canvas  = document.createElement('canvas');
+          const img     = await loadImg(dataUrl);
+          canvas.width  = img.naturalWidth  || img.width;
+          canvas.height = img.naturalHeight || img.height;
+          canvas.getContext('2d').drawImage(img, 0, 0);
+          blob     = await new Promise(r => canvas.toBlob(r, q, 0.98));
+          ext      = outputFmt === 'jpg' ? '.jpg' : '.png';
+          mimeType = q;
+        }
       }
 
-      // Resolve name: user typed → AI (optional) → sequential
-      let finalName = docName.trim();
-      if (!finalName) {
+      // Resolve name: user typed → AI → sequential
+      let name = docName.trim();
+      if (!name) {
         const firstBlob = dataUrlToBlob(pages[0].processed || pages[0].original);
-        const firstFile = new File([firstBlob], 'scan.jpg', { type: 'image/jpeg' });
+        const firstFile = new File([firstBlob], 'scan.jpg', { type:'image/jpeg' });
         const aiName    = await suggestName(firstFile, folder.path).catch(() => null);
-        finalName = aiName ? sanitise(aiName) : getSequentialName(folder.path, '.pdf').replace('.pdf','');
+        name = aiName ? sanitise(aiName) : getSequentialName(folder.path, ext).replace(ext, '');
       }
-      finalName = finalName.replace(/\.pdf$/i, '') + '.pdf';
+      const fileName = name.replace(/\.[^.]+$/, '') + ext;
 
-      const pdfBlob = pdf.output('blob');
-      const form    = new FormData();
-      form.append('document',   pdfBlob, finalName);
-      form.append('folderPath', folder.path);  // ← path is source of truth
-      form.append('customName', finalName);
+      const form = new FormData();
+      form.append('document',   blob, fileName);
+      form.append('folderPath', folder.path);
+      form.append('customName', fileName);
 
       const h = await getAuthHeader();
       const { data } = await axios.post(`${BASE}/upload`, form, {
@@ -659,37 +826,37 @@ export default function ScannerPage() {
 
       confirmUsed(folder.path);
       localStorage.setItem('dv_last_folder', JSON.stringify(folder));
-      setUploadDone(data.file);
+      setUploadDone({ ...data.file, fileName });
     } catch (e) {
-      setError(e.response?.data?.error || e.message);
+      setError(e.response?.data?.detail || e.response?.data?.error || e.message);
     } finally {
       setUploading(false);
     }
   }
 
-  const activePage = pages[selected];
+  const activePage = pages[selected] || pages[0];
 
-  // ── Crop editor overlay ──
-  if (cropPage) {
+  // ── Crop overlay ──
+  if (cropIndex !== null && pages[cropIndex]) {
     return (
       <CropEditor
-        page={cropPage}
-        onDone={croppedUrl => applyCrop(cropPage.id, croppedUrl)}
-        onCancel={() => setCropPage(null)}
+        page={pages[cropIndex]}
+        onDone={url => applyCrop(cropIndex, url)}
+        onCancel={() => setCropIndex(null)}
       />
     );
   }
 
-  // ── Upload done screen ──
+  // ── Upload done ──
   if (uploadDone) {
     return (
       <div className="page" style={{ background:'var(--cream)' }}>
         <Navbar />
-        <div style={{ maxWidth:460, margin:'0 auto', padding:'52px 20px', textAlign:'center' }}>
-          <div style={{ fontSize:56, marginBottom:16 }}>✅</div>
-          <h2 style={{ marginBottom:8 }}>PDF saved!</h2>
-          <p style={{ fontSize:14, color:'var(--ink-3)', fontFamily:'var(--mono)', marginBottom:4 }}>
-            {uploadDone.name}
+        <div style={{ maxWidth:440, margin:'0 auto', padding:'52px 20px', textAlign:'center' }}>
+          <div style={{ fontSize:60, marginBottom:16 }}>✅</div>
+          <h2 style={{ marginBottom:8 }}>Saved to Drive!</h2>
+          <p style={{ fontFamily:'var(--mono)', fontSize:13, color:'var(--ink-3)', marginBottom:4 }}>
+            {uploadDone.fileName || uploadDone.name}
           </p>
           <p style={{ fontSize:12, color:'var(--ink-4)', marginBottom:28 }}>
             DocVault/{folder?.path}
@@ -697,21 +864,20 @@ export default function ScannerPage() {
           <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
             {uploadDone.viewLink && (
               <a href={uploadDone.viewLink} target="_blank" rel="noopener noreferrer"
-                style={{
-                  display:'flex', alignItems:'center', justifyContent:'center',
-                  padding:'14px', borderRadius:14,
-                  background:'var(--accent)', color:'white',
-                  textDecoration:'none', fontSize:15, fontWeight:600, fontFamily:'var(--font)',
-                }}>
+                style={{ padding:'14px', borderRadius:14, background:'var(--accent)',
+                  color:'white', textDecoration:'none', fontSize:15, fontWeight:700,
+                  fontFamily:'var(--font)', display:'block' }}>
                 Open in Drive ↗
               </a>
             )}
             <button onClick={() => { setPages([]); setUploadDone(null); setDocName(''); setSelected(0); }}
-              style={{ padding:'14px', borderRadius:14, border:'1.5px solid var(--border)', background:'white', fontSize:15, cursor:'pointer', fontFamily:'var(--font)' }}>
-              Scan another
+              style={{ padding:'13px', borderRadius:14, border:'1.5px solid var(--border)',
+                background:'white', fontSize:15, cursor:'pointer', fontFamily:'var(--font)' }}>
+              Scan another document
             </button>
             <button onClick={() => navigate('/dashboard')}
-              style={{ padding:'12px', borderRadius:14, border:'none', background:'none', fontSize:14, color:'var(--ink-3)', cursor:'pointer', fontFamily:'var(--font)' }}>
+              style={{ padding:'11px', borderRadius:14, border:'none', background:'none',
+                fontSize:14, color:'var(--ink-3)', cursor:'pointer', fontFamily:'var(--font)' }}>
               Back to Dashboard
             </button>
           </div>
@@ -721,40 +887,35 @@ export default function ScannerPage() {
   }
 
   return (
-    <div style={{ minHeight:'100vh', background:'#111', display:'flex', flexDirection:'column', paddingBottom:'var(--bottom-bar-h)' }}>
+    <div style={{ height:'100dvh', height:'100vh', background:'#111',
+      display:'flex', flexDirection:'column', overflow:'hidden',
+      paddingBottom:'var(--bottom-bar-h)' }}>
       <Navbar darkBg />
 
       {/* ── Empty state ── */}
       {pages.length === 0 && (
-        <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:20, padding:'32px 24px' }}>
-          <div style={{ fontSize:52, opacity:.25 }}>📄</div>
-          <p style={{ color:'rgba(255,255,255,.45)', fontSize:15, fontFamily:'var(--font)' }}>
+        <div style={{ flex:1, display:'flex', flexDirection:'column',
+          alignItems:'center', justifyContent:'center', gap:20, padding:'32px 24px' }}>
+          <div style={{ fontSize:56, opacity:.2 }}>📄</div>
+          <p style={{ color:'rgba(255,255,255,.4)', fontSize:15, fontFamily:'var(--font)' }}>
             No pages yet
           </p>
           <div style={{ display:'flex', gap:12, flexWrap:'wrap', justifyContent:'center' }}>
-            <button
-              onClick={() => setShowCamera(true)}
-              style={{
-                display:'flex', alignItems:'center', gap:8,
-                padding:'13px 22px', borderRadius:14,
-                background:'var(--accent)', color:'white', border:'none',
-                fontSize:15, fontWeight:600, cursor:'pointer', fontFamily:'var(--font)',
-                minHeight:52, WebkitTapHighlightColor:'transparent',
-              }}>
-              📷 Use Camera
-            </button>
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              style={{
-                display:'flex', alignItems:'center', gap:8,
-                padding:'13px 22px', borderRadius:14,
-                background:'rgba(255,255,255,.1)', color:'rgba(255,255,255,.85)',
-                border:'1.5px solid rgba(255,255,255,.2)',
-                fontSize:15, cursor:'pointer', fontFamily:'var(--font)',
-                minHeight:52, WebkitTapHighlightColor:'transparent',
-              }}>
-              🖼 Pick from Gallery
-            </button>
+            <button onClick={() => setShowCamera(true)} style={{
+              padding:'14px 24px', borderRadius:14,
+              background:'var(--accent)', color:'white', border:'none',
+              fontSize:15, fontWeight:600, cursor:'pointer', fontFamily:'var(--font)',
+              minHeight:52, display:'flex', alignItems:'center', gap:8,
+              WebkitTapHighlightColor:'transparent',
+            }}>📷 Use Camera</button>
+            <button onClick={() => fileInputRef.current?.click()} style={{
+              padding:'14px 24px', borderRadius:14,
+              background:'rgba(255,255,255,.1)', color:'rgba(255,255,255,.85)',
+              border:'1.5px solid rgba(255,255,255,.18)',
+              fontSize:15, cursor:'pointer', fontFamily:'var(--font)',
+              minHeight:52, display:'flex', alignItems:'center', gap:8,
+              WebkitTapHighlightColor:'transparent',
+            }}>🖼 Gallery</button>
           </div>
           <input ref={fileInputRef} type="file" multiple accept="image/*,application/pdf"
             style={{ display:'none' }} onChange={e => handleFiles(e.target.files)} />
@@ -764,137 +925,159 @@ export default function ScannerPage() {
       {/* ── Pages view ── */}
       {pages.length > 0 && activePage && (
         <>
-          {/* Main preview */}
-          <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center', padding:'10px', minHeight:0 }}>
-            <div style={{ position:'relative' }}>
-              <img
-                src={activePage.processed || activePage.original} alt="page"
-                style={{
-                  maxWidth:'100%',
-                  maxHeight:'calc(100dvh - 320px)',
-                  maxHeight:'calc(100vh - 320px)',
-                  objectFit:'contain', borderRadius:6,
-                  boxShadow:'0 6px 28px rgba(0,0,0,.6)',
-                  display:'block',
-                }}
-              />
-              {/* Crop button on preview */}
-              <button
-                onClick={() => setCropPage(activePage)}
-                style={{
-                  position:'absolute', top:8, right:8,
-                  background:'rgba(0,0,0,.65)', border:'none', color:'white',
-                  borderRadius:8, padding:'6px 10px', fontSize:12,
-                  cursor:'pointer', fontFamily:'var(--font)',
-                  display:'flex', alignItems:'center', gap:4,
-                  WebkitTapHighlightColor:'transparent',
-                }}>
-                ✂️ Crop
-              </button>
-            </div>
+          {/* Preview */}
+          <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center',
+            padding:'10px', minHeight:0, position:'relative' }}>
+            <img src={activePage.processed || activePage.original} alt="preview"
+              style={{
+                maxWidth:'100%',
+                maxHeight:'calc(100dvh - 310px)',
+                maxHeight:'calc(100vh - 310px)',
+                objectFit:'contain', borderRadius:7,
+                boxShadow:'0 6px 32px rgba(0,0,0,.65)', display:'block',
+              }} />
+            {/* Crop button on image */}
+            <button onClick={() => setCropIndex(selected)} style={{
+              position:'absolute', top:18, right:18,
+              background:'rgba(0,0,0,.7)', backdropFilter:'blur(6px)',
+              border:'none', color:'white', borderRadius:99,
+              padding:'7px 14px', fontSize:13, cursor:'pointer',
+              display:'flex', alignItems:'center', gap:5, fontFamily:'var(--font)',
+              WebkitTapHighlightColor:'transparent',
+            }}>✂️ Crop</button>
           </div>
 
-          {/* Filter + tool bar */}
-          <div style={{
-            display:'flex', gap:7, padding:'8px 12px', overflowX:'auto',
-            background:'rgba(0,0,0,.5)', WebkitOverflowScrolling:'touch',
-            scrollbarWidth:'none', flexShrink:0,
-          }}>
+          {/* Filter row */}
+          <div style={{ display:'flex', gap:7, padding:'7px 12px',
+            overflowX:'auto', WebkitOverflowScrolling:'touch', scrollbarWidth:'none',
+            background:'rgba(0,0,0,.55)', flexShrink:0 }}>
             {[
-              { id:'original', label:'Original' },
-              { id:'enhance',  label:'Enhance' },
-              { id:'bw',       label:'B&W' },
-              { id:'magic',    label:'Magic' },
+              { id:'original', label:'Original', icon:'📷' },
+              { id:'enhance',  label:'Enhance',  icon:'✨' },
+              { id:'bw',       label:'B&W',       icon:'⬛' },
+              { id:'magic',    label:'Magic',     icon:'🪄' },
             ].map(f => (
-              <button key={f.id} onClick={() => applyFilterToPage(selected, f.id)}
-                style={{
-                  padding:'7px 14px', borderRadius:99, border:'none', cursor:'pointer',
-                  background: activePage.filter === f.id ? 'var(--accent)' : 'rgba(255,255,255,.1)',
-                  color: activePage.filter === f.id ? 'white' : 'rgba(255,255,255,.75)',
-                  fontSize:12, fontFamily:'var(--font)', whiteSpace:'nowrap',
-                  fontWeight: activePage.filter === f.id ? 600 : 400,
-                  minHeight:34, WebkitTapHighlightColor:'transparent',
-                }}>
-                {f.label}
-              </button>
+              <button key={f.id} onClick={() => applyFilter(selected, f.id)} style={{
+                padding:'7px 13px', borderRadius:99, border:'none', cursor:'pointer',
+                background: activePage.filter === f.id ? 'var(--accent)' : 'rgba(255,255,255,.1)',
+                color: activePage.filter === f.id ? 'white' : 'rgba(255,255,255,.75)',
+                fontSize:12, fontFamily:'var(--font)', whiteSpace:'nowrap',
+                fontWeight: activePage.filter === f.id ? 600 : 400, minHeight:34,
+                WebkitTapHighlightColor:'transparent', display:'flex', alignItems:'center', gap:5,
+              }}>{f.icon} {f.label}</button>
             ))}
             <div style={{ width:1, background:'rgba(255,255,255,.12)', margin:'0 2px', flexShrink:0 }} />
-            <button onClick={rotateCurrentPage}
-              style={{ padding:'7px 13px', borderRadius:99, border:'none', cursor:'pointer', background:'rgba(255,255,255,.1)', color:'rgba(255,255,255,.75)', fontSize:12, fontFamily:'var(--font)', whiteSpace:'nowrap', minHeight:34, WebkitTapHighlightColor:'transparent' }}>
-              ↻ Rotate
-            </button>
-            <button onClick={() => movePage(selected, -1)} disabled={selected === 0}
-              style={{ padding:'7px 12px', borderRadius:99, border:'none', cursor:'pointer', background:'rgba(255,255,255,.1)', color: selected===0 ? 'rgba(255,255,255,.25)' : 'rgba(255,255,255,.75)', fontSize:12, fontFamily:'var(--font)', whiteSpace:'nowrap', minHeight:34, WebkitTapHighlightColor:'transparent' }}>
-              ← Move
-            </button>
-            <button onClick={() => movePage(selected, 1)} disabled={selected === pages.length - 1}
-              style={{ padding:'7px 12px', borderRadius:99, border:'none', cursor:'pointer', background:'rgba(255,255,255,.1)', color: selected===pages.length-1 ? 'rgba(255,255,255,.25)' : 'rgba(255,255,255,.75)', fontSize:12, fontFamily:'var(--font)', whiteSpace:'nowrap', minHeight:34, WebkitTapHighlightColor:'transparent' }}>
-              Move →
-            </button>
+            <button onClick={() => rotate(selected)} style={{
+              padding:'7px 12px', borderRadius:99, border:'none', cursor:'pointer',
+              background:'rgba(255,255,255,.1)', color:'rgba(255,255,255,.75)',
+              fontSize:12, fontFamily:'var(--font)', whiteSpace:'nowrap', minHeight:34,
+              WebkitTapHighlightColor:'transparent',
+            }}>↻ Rotate</button>
+            <button onClick={() => movePage(selected,-1)} disabled={selected===0} style={{
+              padding:'7px 12px', borderRadius:99, border:'none', cursor:'pointer',
+              background:'rgba(255,255,255,.1)',
+              color: selected===0 ? 'rgba(255,255,255,.25)' : 'rgba(255,255,255,.75)',
+              fontSize:12, fontFamily:'var(--font)', whiteSpace:'nowrap', minHeight:34,
+              WebkitTapHighlightColor:'transparent',
+            }}>← Move</button>
+            <button onClick={() => movePage(selected,1)} disabled={selected===pages.length-1} style={{
+              padding:'7px 12px', borderRadius:99, border:'none', cursor:'pointer',
+              background:'rgba(255,255,255,.1)',
+              color: selected===pages.length-1 ? 'rgba(255,255,255,.25)' : 'rgba(255,255,255,.75)',
+              fontSize:12, fontFamily:'var(--font)', whiteSpace:'nowrap', minHeight:34,
+              WebkitTapHighlightColor:'transparent',
+            }}>Move →</button>
           </div>
 
           {/* Page strip */}
-          <PageStrip pages={pages} selected={selected} onSelect={setSelected}
-            onDelete={deletePage} onAdd={() => setShowCamera(true)} />
+          <PageStrip
+            pages={pages} selected={selected}
+            onSelect={setSelected}
+            onCrop={i => setCropIndex(i)}
+            onDelete={deletePage}
+            onAdd={() => setShowCamera(true)}
+          />
 
-          {/* Bottom action bar */}
-          <div style={{
-            background:'white', padding:'12px 14px',
-            borderTop:'1px solid var(--border-soft)', flexShrink:0,
-          }}>
-            {/* Doc name */}
-            <div style={{ display:'flex', gap:8, marginBottom:9, alignItems:'center' }}>
-              <input
-                value={docName}
-                onChange={e => setDocName(e.target.value)}
-                placeholder="Document name (auto if blank)…"
+          {/* Bottom bar */}
+          <div style={{ background:'white', padding:'11px 13px',
+            borderTop:'1px solid var(--border-soft)', flexShrink:0 }}>
+
+            {/* Name + add page */}
+            <div style={{ display:'flex', gap:8, marginBottom:8, alignItems:'center' }}>
+              <input value={docName} onChange={e => setDocName(e.target.value)}
+                placeholder="Name (auto if blank)…"
                 style={{
-                  flex:1, padding:'11px 13px', border:'1.5px solid var(--border)',
-                  borderRadius:10, fontFamily:'var(--font)', fontSize:16,
-                  outline:'none', background:'var(--paper)', color:'var(--ink)',
-                  minHeight:46,
-                }}
-              />
-              <button onClick={() => fileInputRef.current?.click()}
-                style={{
-                  width:46, height:46, borderRadius:10,
-                  border:'1px solid var(--border)', background:'var(--paper)',
-                  cursor:'pointer', fontSize:20, display:'flex', alignItems:'center', justifyContent:'center',
-                  WebkitTapHighlightColor:'transparent', flexShrink:0,
-                }}>＋</button>
+                  flex:1, padding:'10px 12px',
+                  border:'1.5px solid var(--border)', borderRadius:10,
+                  fontFamily:'var(--font)', fontSize:16, outline:'none',
+                  background:'var(--paper)', color:'var(--ink)', minHeight:44,
+                }} />
+              <button onClick={() => fileInputRef.current?.click()} style={{
+                width:44, height:44, borderRadius:10,
+                border:'1px solid var(--border)', background:'var(--paper)',
+                cursor:'pointer', fontSize:18, display:'flex', alignItems:'center', justifyContent:'center',
+                flexShrink:0, WebkitTapHighlightColor:'transparent',
+              }}>＋</button>
               <input ref={fileInputRef} type="file" multiple accept="image/*,application/pdf"
                 style={{ display:'none' }} onChange={e => handleFiles(e.target.files)} />
             </div>
 
-            {/* Folder selector */}
-            <button onClick={() => setShowFolder(true)} style={{
-              width:'100%', textAlign:'left', padding:'10px 13px', marginBottom:9,
-              border:`1.5px solid ${folder ? 'var(--accent-light)' : '#e8a040'}`,
-              background: folder ? 'var(--accent-bg)' : '#fff8ee',
-              borderRadius:10, cursor:'pointer',
-              display:'flex', alignItems:'center', gap:8, fontFamily:'var(--font)',
-              minHeight:46, WebkitTapHighlightColor:'transparent',
-            }}>
-              <span style={{ fontSize:16 }}>📂</span>
-              <span style={{ fontSize:13, color: folder ? 'var(--accent)' : '#9a6010', flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                {folder ? `DocVault/${folder.path}` : 'Tap to choose folder'}
-              </span>
-              <span style={{ fontSize:14, color:'var(--ink-4)', flexShrink:0 }}>›</span>
-            </button>
+            {/* Output format + folder on same row */}
+            <div style={{ display:'flex', gap:8, marginBottom:8, alignItems:'stretch' }}>
+              {/* Format selector */}
+              <div style={{ display:'flex', gap:4, background:'var(--sand)', borderRadius:9, padding:3, flexShrink:0 }}>
+                {['pdf','jpg','png'].map(fmt => (
+                  <button key={fmt} onClick={() => setOutputFmt(fmt)} style={{
+                    padding:'5px 10px', borderRadius:7,
+                    background: outputFmt===fmt ? 'white' : 'transparent',
+                    border:'none', cursor:'pointer',
+                    fontSize:12, fontWeight: outputFmt===fmt ? 700 : 400,
+                    color: outputFmt===fmt ? 'var(--ink)' : 'var(--ink-3)',
+                    fontFamily:'var(--font)', minHeight:34, textTransform:'uppercase',
+                    boxShadow: outputFmt===fmt ? '0 1px 4px rgba(0,0,0,.12)' : 'none',
+                    WebkitTapHighlightColor:'transparent',
+                  }}>{fmt}</button>
+                ))}
+              </div>
 
-            {error && <p style={{ fontSize:12, color:'var(--red)', marginBottom:8 }}>⚠ {error}</p>}
+              {/* Folder */}
+              <button onClick={() => setShowFolder(true)} style={{
+                flex:1, textAlign:'left', padding:'7px 12px',
+                border:`1.5px solid ${folder ? 'var(--accent-light)' : '#e8a040'}`,
+                background: folder ? 'var(--accent-bg)' : '#fff8ee',
+                borderRadius:9, cursor:'pointer', fontFamily:'var(--font)',
+                display:'flex', alignItems:'center', gap:7, minHeight:44,
+                WebkitTapHighlightColor:'transparent', overflow:'hidden',
+              }}>
+                <span style={{ fontSize:15, flexShrink:0 }}>📂</span>
+                <span style={{ fontSize:12, color: folder ? 'var(--accent)' : '#9a6010',
+                  flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                  {folder ? `DocVault/${folder.path}` : 'Choose folder'}
+                </span>
+                <span style={{ fontSize:13, color:'var(--ink-4)', flexShrink:0 }}>›</span>
+              </button>
+            </div>
 
-            <button onClick={buildAndUpload} disabled={uploading} style={{
-              width:'100%', padding:'15px', borderRadius:14,
+            {/* Multi-page + jpg/png warning */}
+            {pages.length > 1 && outputFmt !== 'pdf' && (
+              <p style={{ fontSize:11, color:'var(--amber)', marginBottom:6 }}>
+                ⚠️ Multiple pages will be saved as PDF regardless
+              </p>
+            )}
+
+            {error && <p style={{ fontSize:12, color:'var(--red)', marginBottom:6 }}>⚠ {error}</p>}
+
+            <button onClick={saveAndUpload} disabled={uploading} style={{
+              width:'100%', padding:'14px', borderRadius:13,
               background: uploading ? 'var(--accent-light)' : 'var(--accent)',
               color:'white', border:'none', fontSize:15, fontWeight:700,
               cursor: uploading ? 'default' : 'pointer', fontFamily:'var(--font)',
               display:'flex', alignItems:'center', justifyContent:'center', gap:8,
-              minHeight:54, WebkitTapHighlightColor:'transparent',
+              minHeight:52, WebkitTapHighlightColor:'transparent',
             }}>
               {uploading
-                ? <><span className="spin" style={{ display:'inline-block', width:16, height:16, border:'2px solid rgba(255,255,255,.3)', borderTopColor:'white', borderRadius:'50%' }} /> Building PDF…</>
-                : `Save ${pages.length} page${pages.length !== 1 ? 's' : ''} as PDF →`
+                ? <><span className="spin" style={{ display:'inline-block', width:16, height:16, border:'2px solid rgba(255,255,255,.3)', borderTopColor:'white', borderRadius:'50%' }} /> Building {outputFmt.toUpperCase()}…</>
+                : `Save ${pages.length}p as ${outputFmt.toUpperCase()} →`
               }
             </button>
           </div>
@@ -902,7 +1085,10 @@ export default function ScannerPage() {
       )}
 
       {showCamera && (
-        <CameraCapture onCapture={handleCamera} onClose={() => setShowCamera(false)} />
+        <CameraCapture
+          onCapture={handleCamera}
+          onClose={() => setShowCamera(false)}
+        />
       )}
 
       {showFolder && (
