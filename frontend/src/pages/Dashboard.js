@@ -180,7 +180,7 @@ export default function Dashboard() {
               placeholder="Search documents…"
               value={search}
               onChange={e => setSearch(e.target.value)}
-              style={{ paddingLeft: 38, fontSize: 14 }}
+              style={{ paddingLeft: 38, fontSize: 16 }}
             />
           </div>
         </div>
@@ -193,6 +193,8 @@ export default function Dashboard() {
             borderBottom: '1px solid var(--border-soft)',
             overflowX: 'auto',
             WebkitOverflowScrolling: 'touch',
+            scrollbarWidth: 'none',  /* Firefox */
+            msOverflowStyle: 'none', /* IE */
           }}>
             {[
               { key: 'all',     label: `All (${allDocs.length})` },
@@ -246,7 +248,7 @@ export default function Dashboard() {
               <div style={{ fontSize: 56, marginBottom: 16, opacity: .35 }}>🗄️</div>
               <h2 style={{ marginBottom: 10, fontSize: '1.1rem' }}>Your vault is empty</h2>
               <p style={{ color: 'var(--ink-3)', marginBottom: 28, fontSize: 14, lineHeight: 1.6 }}>
-                Upload your first document — Claude will read it and file it in the right folder automatically.
+                Upload your first document and it will appear here, organised in your chosen folder.
               </p>
               <button className="btn btn-primary" onClick={() => navigate('/upload')}
                 style={{ fontSize: 15, padding: '13px 24px' }}>

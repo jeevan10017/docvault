@@ -69,12 +69,12 @@ export default function FolderSheet({ getAuthHeader, lastUsedFolderId, onSelect,
         <div style={{ padding:'12px 16px 0' }}>
           <input ref={searchRef} className="input" value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Search folders…" style={{ marginBottom:10 }} />
+            placeholder="Search folders…" style={{ marginBottom:10, fontSize:16 }} />
 
           {creating ? (
             <div style={{ display:'flex', gap:8, marginBottom:10 }}>
               <input className="input" value={newName} onChange={e => setNewName(e.target.value)}
-                placeholder="e.g. Finance/Invoices" style={{ flex:1 }}
+                placeholder="e.g. Finance/Invoices" style={{ flex:1, fontSize:16 }}
                 onKeyDown={e => e.key === 'Enter' && createFolder()} autoFocus />
               <button className="btn btn-primary" onClick={createFolder}
                 disabled={!newName.trim() || saving} style={{ padding:'0 14px', minHeight:44 }}>
@@ -91,7 +91,7 @@ export default function FolderSheet({ getAuthHeader, lastUsedFolderId, onSelect,
           )}
         </div>
 
-        <div style={{ padding:'0 16px 32px', maxHeight:'55vh', overflowY:'auto' }}>
+        <div style={{ padding:'0 16px 32px', maxHeight:'55vh', overflowY:'auto', WebkitOverflowScrolling:'touch', scrollbarWidth:'none' }}>
           {loading && <div style={{ textAlign:'center', padding:'32px 0' }}><Spinner size={24} /></div>}
           {!loading && error && (
             <div style={{ color:'var(--red)', fontSize:13, padding:'12px 0' }}>
@@ -113,7 +113,7 @@ export default function FolderSheet({ getAuthHeader, lastUsedFolderId, onSelect,
                 display:'flex', alignItems:'center', gap:10,
                 background: isLast ? 'var(--accent-bg)' : 'white',
                 border:'1.5px solid ' + (isLast ? 'var(--accent)' : 'var(--border-soft)'),
-                borderRadius:'var(--r)', marginBottom:6, cursor:'pointer', fontFamily:'var(--font)',
+                borderRadius:'var(--r)', marginBottom:6, cursor:'pointer', fontFamily:'var(--font)', minHeight:52,
               }}>
                 <span style={{ fontSize:18, marginLeft: depth * 10 }}>📂</span>
                 <span style={{ flex:1, minWidth:0 }}>

@@ -27,7 +27,7 @@ async function findFolder(drive, name, parentId) {
   return res.data.files.length > 0 ? res.data.files[0].id : null;
 }
 
-/** Find or create a folder by name inside parentId. */
+/** Find or create a folder by name inside parentId. Always returns a valid ID. */
 async function findOrCreateFolder(drive, name, parentId) {
   const existing = await findFolder(drive, name, parentId);
   if (existing) return existing;
@@ -45,50 +45,78 @@ async function findOrCreateFolder(drive, name, parentId) {
   return res.data.id;
 }
 
-/** Get the DocVault root folder ID (creates it if missing). */
+/** Get (or create) the top-level DocVault folder ID. */
 async function getDocVaultRootId(drive) {
   const root = process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID || 'root';
   return findOrCreateFolder(drive, 'DocVault', root);
 }
 
 /**
- * Resolve a slash-separated path under DocVault, creating folders as needed.
- * e.g. "Identity/Aadhaar" → creates DocVault/Identity/Aadhaar and returns the leaf ID.
+ * Resolve a slash-separated path under DocVault, creating all folders.
+ * e.g. "Identity/Aadhaar" → creates DocVault/Identity/Aadhaar, returns leaf ID.
  */
 async function resolveOrCreateFolderPath(drive, folderPath) {
   const rootId = await getDocVaultRootId(drive);
-  const parts = folderPath.split('/').filter(Boolean);
-  let current = rootId;
+  const parts  = (folderPath || '').split('/').filter(Boolean);
+  let current  = rootId;
   for (const part of parts) {
     current = await findOrCreateFolder(drive, part, current);
   }
   return current;
 }
 
-/** Upload a file. Accepts either folderPath (string) or folderId (Drive ID). */
+/**
+ * Upload a file to Google Drive.
+ *
+ * IMPORTANT: We ALWAYS resolve via folderPath, never trust a client-provided
+ * folderId directly. Drive folder IDs stored on the client can go stale
+ * (folder deleted and recreated, different account, etc.) causing
+ * "File not found" errors. folderPath is the source of truth.
+ *
+ * @param {object} tokens
+ * @param {object} opts - { filePath, fileName, mimeType, folderPath, folderId }
+ */
 async function uploadFileToDrive(tokens, { filePath, fileName, mimeType, folderPath, folderId }) {
   const drive = getDriveClient(tokens);
 
+  // Always resolve the folder fresh from the path.
+  // If folderPath is empty but folderId is provided, try the folderId as a
+  // fallback — but wrap in try/catch so a stale ID never kills the upload.
   let targetFolderId;
-  if (folderId) {
-    targetFolderId = folderId;
-  } else {
+
+  if (folderPath) {
+    // Preferred: resolve by path — creates folders if missing, always reliable
+    console.log(`   📂 Resolving folder path: DocVault/${folderPath}`);
     targetFolderId = await resolveOrCreateFolderPath(drive, folderPath);
+  } else if (folderId) {
+    // Fallback: try the provided ID — verify it exists first
+    try {
+      await drive.files.get({ fileId: folderId, fields: 'id,name,trashed' });
+      targetFolderId = folderId;
+      console.log(`   📂 Using provided folderId: ${folderId}`);
+    } catch (e) {
+      // Stale ID — fall back to DocVault root
+      console.warn(`   ⚠️  folderId ${folderId} not accessible (${e.message}), uploading to DocVault root`);
+      targetFolderId = await getDocVaultRootId(drive);
+    }
+  } else {
+    // No folder specified — use DocVault root
+    targetFolderId = await getDocVaultRootId(drive);
   }
+
+  console.log(`   📤 Uploading "${fileName}" to folder ${targetFolderId}`);
 
   const response = await drive.files.create({
     requestBody: { name: fileName, parents: [targetFolderId] },
     media: { mimeType, body: fs.createReadStream(filePath) },
     fields: 'id,name,webViewLink,webContentLink,size,createdTime',
   });
+
+  console.log(`   ✅ Uploaded: ${response.data.webViewLink}`);
   return response.data;
 }
 
-/**
- * List ALL folders inside DocVault recursively (up to 2 levels deep).
- * Returns flat array of { id, name, path, parentId }.
- * Used by the frontend folder picker dropdown.
- */
+/** List ALL sub-folders inside DocVault (for picker). */
 async function listDocVaultFolders(tokens) {
   const drive = getDriveClient(tokens);
 
@@ -103,13 +131,13 @@ async function listDocVaultFolders(tokens) {
   const folders = [{ id: docVaultId, name: 'DocVault', path: '', parentId: null }];
 
   async function listChildren(parentId, parentPath, depth) {
-    if (depth > 3) return; // cap depth
+    if (depth > 4) return;
     const res = await drive.files.list({
       ...LIST_OPTS,
       q: `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
       fields: 'files(id,name)',
       orderBy: 'name',
-      pageSize: 50,
+      pageSize: 100,
     });
     for (const f of res.data.files) {
       const p = parentPath ? `${parentPath}/${f.name}` : f.name;
@@ -122,22 +150,19 @@ async function listDocVaultFolders(tokens) {
   return folders;
 }
 
-/**
- * Create a brand new folder at the given path under DocVault.
- * Returns { id, name, path }.
- */
+/** Create a folder path and return { id, name, path }. */
 async function createFolderPath(tokens, folderPath) {
   const drive = getDriveClient(tokens);
-  const id = await resolveOrCreateFolderPath(drive, folderPath);
+  const id    = await resolveOrCreateFolderPath(drive, folderPath);
   return { id, name: folderPath.split('/').pop(), path: folderPath };
 }
 
-/** List recent files inside DocVault root (for dashboard). */
+/** List recent files inside DocVault (for dashboard). */
 async function listDocVaultFiles(tokens, folderPath = '') {
-  const drive = getDriveClient(tokens);
-  const rootId = await getDocVaultRootId(drive);
+  const drive    = getDriveClient(tokens);
+  const rootId   = await getDocVaultRootId(drive);
+  let folderId   = rootId;
 
-  let folderId = rootId;
   if (folderPath) {
     const parts = folderPath.split('/').filter(Boolean);
     for (const part of parts) {
@@ -155,4 +180,10 @@ async function listDocVaultFiles(tokens, folderPath = '') {
   return res.data.files;
 }
 
-module.exports = { uploadFileToDrive, listDocVaultFiles, listDocVaultFolders, createFolderPath, getDriveClient };
+module.exports = {
+  uploadFileToDrive,
+  listDocVaultFiles,
+  listDocVaultFolders,
+  createFolderPath,
+  getDriveClient,
+};
