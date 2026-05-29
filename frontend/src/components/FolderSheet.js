@@ -29,7 +29,6 @@ export default function FolderSheet({ getAuthHeader, lastUsedFolderId, onSelect,
 
   useEffect(() => { load(); }, [load, getAuthHeader]);
   useEffect(() => { if (!loading) searchRef.current?.focus(); }, [loading]);
-  }
 
   async function createFolder() {
     const name = newName.trim();
