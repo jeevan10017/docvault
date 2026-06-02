@@ -318,18 +318,26 @@ function CameraCapture({ onCapture, onClose }) {
   const [torch, setTorch] = useState(false);
 
   // Attach stream to video element — called from both directions
-  function attachStream(video, stream) {
-    if (!video || !stream) return;
-    if (video.srcObject === stream) return; // already attached
-    video.srcObject = stream;
-    video.onloadedmetadata = () => {
-      video.play()
-        .then(() => { if (mountedRef.current) setReady(true); })
-        .catch(() => { if (mountedRef.current) setReady(true); });
-    };
-    // Some browsers fire 'canplay' instead
-    video.oncanplay = () => { if (mountedRef.current && !ready) setReady(true); };
-  }
+ const attachStream = React.useCallback((video, stream) => {
+  if (!video || !stream) return;
+  if (video.srcObject === stream) return;
+
+  video.srcObject = stream;
+
+  video.onloadedmetadata = () => {
+    video.play()
+      .then(() => {
+        if (mountedRef.current) setReady(true);
+      })
+      .catch(() => {
+        if (mountedRef.current) setReady(true);
+      });
+  };
+
+  video.oncanplay = () => {
+    if (mountedRef.current) setReady(true);
+  };
+}, []);
 
   // Callback ref — fires every time the <video> element mounts/unmounts
   const videoCallbackRef = (el) => {
@@ -380,7 +388,7 @@ function CameraCapture({ onCapture, onClose }) {
       streamRef.current?.getTracks().forEach(t => t.stop());
       streamRef.current = null;
     };
-  }, []);
+  }, [attachStream]);
 
   function shoot() {
     const v = videoRef.current;
@@ -719,18 +727,16 @@ export default function ScannerPage() {
     setUploading(true); setError('');
 
     try {
-      let blob, ext, mimeType;
+      let blob, ext;
 
       if (outputFmt === 'pdf') {
         blob     = await buildPDF(pages);
         ext      = '.pdf';
-        mimeType = 'application/pdf';
       } else {
         // For image formats: if multi-page, build a PDF anyway (can't merge to one JPG/PNG)
         if (pages.length > 1) {
           blob     = await buildPDF(pages);
           ext      = '.pdf';
-          mimeType = 'application/pdf';
         } else {
           const dataUrl = pages[0].processed || pages[0].original;
           const q       = outputFmt === 'jpg' ? 'image/jpeg' : 'image/png';
@@ -741,7 +747,6 @@ export default function ScannerPage() {
           canvas.getContext('2d').drawImage(img, 0, 0);
           blob     = await new Promise(r => canvas.toBlob(r, q, 0.98));
           ext      = outputFmt === 'jpg' ? '.jpg' : '.png';
-          mimeType = q;
         }
       }
 
@@ -828,7 +833,7 @@ export default function ScannerPage() {
   }
 
   return (
-    <div style={{ height:'100dvh', height:'100vh', background:'#111',
+    <div style={{ minHeight: '100vh',height: '100dvh', background:'#111',
       display:'flex', flexDirection:'column', overflow:'hidden',
       paddingBottom:'var(--bottom-bar-h)' }}>
       <Navbar darkBg />
@@ -873,7 +878,6 @@ export default function ScannerPage() {
               style={{
                 maxWidth:'100%',
                 maxHeight:'calc(100dvh - 310px)',
-                maxHeight:'calc(100vh - 310px)',
                 objectFit:'contain', borderRadius:7,
                 boxShadow:'0 6px 32px rgba(0,0,0,.65)', display:'block',
               }} />
