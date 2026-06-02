@@ -7,6 +7,7 @@ import axios from 'axios';
 import { BASE } from '../../utils/api';
 import { getSequentialName, confirmUsed, sanitise } from '../../utils/naming';
 import { suggestName } from '../../utils/aiNaming';
+import { perspectiveCrop } from './cropUtils';
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2, 9); }
@@ -82,69 +83,7 @@ async function rotateCW(dataUrl) {
   return c.toDataURL('image/jpeg', 0.98);
 }
 
-// ─── Perspective warp — proper strip-based approach, no pixelation ────────────
-// Uses canvas strip rendering: draws the source image N times, each clipped
-// to a thin horizontal strip, each time applying a slight x-shear to simulate
-// the perspective transform. Produces smooth results without WebGL.
-async function perspectiveCrop(originalDataUrl, pts) {
-  const src = await loadImg(originalDataUrl);
-
-  // Output dimensions: width = avg of top/bottom edge, height = avg of left/right edge
-  const W = Math.round((
-    Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y) +
-    Math.hypot(pts[2].x - pts[3].x, pts[2].y - pts[3].y)
-  ) / 2);
-  const H = Math.round((
-    Math.hypot(pts[3].x - pts[0].x, pts[3].y - pts[0].y) +
-    Math.hypot(pts[2].x - pts[1].x, pts[2].y - pts[1].y)
-  ) / 2);
-
-  const out = document.createElement('canvas');
-  out.width  = W;
-  out.height = H;
-  const ctx  = out.getContext('2d');
-
-  // For each output row, compute the source scanline by lerping between
-  // left and right edges at fraction v = row/H
-  const ROWS = H;
-  for (let row = 0; row < ROWS; row++) {
-    const v = row / ROWS;
-
-    // Left edge point at this v
-    const lx = pts[0].x + (pts[3].x - pts[0].x) * v;
-    const ly = pts[0].y + (pts[3].y - pts[0].y) * v;
-    // Right edge point at this v
-    const rx = pts[1].x + (pts[2].x - pts[1].x) * v;
-    const ry = pts[1].y + (pts[2].y - pts[1].y) * v;
-
-    // Source row y (mid of the horizontal span)
-    const srcY = (ly + ry) / 2;
-    // Horizontal stretch in source
-    const srcW = Math.hypot(rx - lx, ry - ly);
-    const srcX = lx;
-
-    // Draw one horizontal strip: clip to output row, then drawImage with transform
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, row, W, 1);
-    ctx.clip();
-
-    // Rotate the source strip to align with horizontal in dest
-    const angle = Math.atan2(ry - ly, rx - lx);
-    ctx.translate(0, row);
-    ctx.rotate(-angle);
-    ctx.drawImage(
-      src,
-      srcX, srcY - 0.5,           // source x, y
-      Math.max(1, srcW), 1,       // source width, height (1px strip)
-      0, 0,                       // dest x, y
-      W, 1                        // dest width, height
-    );
-    ctx.restore();
-  }
-
-  return out.toDataURL('image/jpeg', 0.98);
-}
+// perspectiveCrop imported from cropUtils.js
 
 // ─── Crop Editor ─────────────────────────────────────────────────────────────
 function CropEditor({ page, onDone, onCancel }) {
@@ -366,77 +305,92 @@ function CropEditor({ page, onDone, onCancel }) {
   );
 }
 
-// ─── Camera Capture ───────────────────────────────────────────────────────────
+// ─── Camera Capture ─────────────────────────────────────────────────────────
+// Robust version: handles timing between stream arrival and DOM mount.
+// Uses a shared ref so stream can be attached to video regardless of order.
 function CameraCapture({ onCapture, onClose }) {
   const videoRef  = useRef(null);
   const streamRef = useRef(null);
-  const [ready,  setReady]  = useState(false);
-  const [flash,  setFlash]  = useState(false);
-  const [error,  setError]  = useState('');
-  const [torch,  setTorch]  = useState(false);
+  const mountedRef = useRef(true);
+  const [ready, setReady] = useState(false);
+  const [flash, setFlash] = useState(false);
+  const [error, setError] = useState('');
+  const [torch, setTorch] = useState(false);
+
+  // Attach stream to video element — called from both directions
+  function attachStream(video, stream) {
+    if (!video || !stream) return;
+    if (video.srcObject === stream) return; // already attached
+    video.srcObject = stream;
+    video.onloadedmetadata = () => {
+      video.play()
+        .then(() => { if (mountedRef.current) setReady(true); })
+        .catch(() => { if (mountedRef.current) setReady(true); });
+    };
+    // Some browsers fire 'canplay' instead
+    video.oncanplay = () => { if (mountedRef.current && !ready) setReady(true); };
+  }
+
+  // Callback ref — fires every time the <video> element mounts/unmounts
+  const videoCallbackRef = (el) => {
+    videoRef.current = el;
+    if (el && streamRef.current) attachStream(el, streamRef.current);
+  };
 
   useEffect(() => {
-    let active = true;
+    mountedRef.current = true;
 
-    async function start() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: 'environment' },
-            width:  { ideal: 4096 },
-            height: { ideal: 3072 },
-          },
-          audio: false,
-        });
-        if (!active) { stream.getTracks().forEach(t => t.stop()); return; }
-        streamRef.current = stream;
+    // Try environment (back) camera first; fall back to any camera
+    const constraints = [
+      { video: { facingMode: { exact: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } }, audio: false },
+      { video: { facingMode: 'environment',             width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false },
+      { video: { facingMode: 'user',                    width: { ideal: 1280 }, height: { ideal: 720  } }, audio: false },
+      { video: true, audio: false },
+    ];
 
-        // Wait for video element to exist in DOM
-        const video = videoRef.current;
-        if (video) {
-          video.srcObject = stream;
-          video.onloadedmetadata = () => {
-            video.play().then(() => { if (active) setReady(true); }).catch(() => {
-              if (active) setReady(true); // try anyway
-            });
-          };
+    async function tryConstraints(list) {
+      for (const c of list) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia(c);
+          if (!mountedRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
+          streamRef.current = stream;
+          // Attach to video if already mounted, otherwise videoCallbackRef will do it
+          if (videoRef.current) attachStream(videoRef.current, stream);
+          return; // success
+        } catch (e) {
+          if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
+            if (mountedRef.current) setError('Camera permission denied. Allow it in browser settings, then try again.');
+            return;
+          }
+          // Try next constraint
         }
-      } catch (e) {
-        if (!active) return;
-        const msg = e.name === 'NotAllowedError'
-          ? 'Camera permission denied. Please allow camera access in browser settings.'
-          : e.name === 'NotFoundError'
-          ? 'No camera found on this device.'
-          : 'Camera error: ' + e.message;
-        setError(msg);
       }
+      if (mountedRef.current) setError('No camera available on this device.');
     }
 
-    start();
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('Camera not supported in this browser. Use Chrome or Safari.');
+      return;
+    }
+
+    tryConstraints(constraints);
+
     return () => {
-      active = false;
+      mountedRef.current = false;
       streamRef.current?.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
     };
   }, []);
 
-  // Also set srcObject when videoRef mounts (handles timing edge cases)
-  const setVideoRef = (el) => {
-    videoRef.current = el;
-    if (el && streamRef.current && !el.srcObject) {
-      el.srcObject = streamRef.current;
-    }
-  };
-
   function shoot() {
     const v = videoRef.current;
-    if (!v || !v.videoWidth) return;
+    if (!v || !v.videoWidth || !v.videoHeight) return;
     setFlash(true);
-    setTimeout(() => setFlash(false), 200);
+    setTimeout(() => setFlash(false), 180);
     const c = document.createElement('canvas');
     c.width  = v.videoWidth;
     c.height = v.videoHeight;
     c.getContext('2d').drawImage(v, 0, 0);
-    // Use max quality JPEG — PDF quality depends on this
     onCapture(c.toDataURL('image/jpeg', 0.98));
   }
 
@@ -453,128 +407,117 @@ function CameraCapture({ onCapture, onClose }) {
     <div style={{ position:'fixed', inset:0, zIndex:300, background:'#000',
       display:'flex', flexDirection:'column', userSelect:'none', touchAction:'none' }}>
 
-      {/* Flash */}
       {flash && (
         <div style={{ position:'absolute', inset:0, background:'white',
-          opacity:.8, zIndex:20, pointerEvents:'none',
-          animation:'fadeInBg .2s ease' }} />
+          opacity:.75, zIndex:20, pointerEvents:'none' }} />
       )}
 
-      {/* Viewfinder video */}
+      {/* Full-screen video */}
       <video
-        ref={setVideoRef}
+        ref={videoCallbackRef}
         autoPlay playsInline muted
-        style={{ position:'absolute', inset:0, width:'100%', height:'100%',
-          objectFit:'cover', display:'block' }}
+        style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover' }}
       />
 
-      {/* Top gradient + controls */}
+      {/* Top controls */}
       <div style={{
         position:'absolute', top:0, left:0, right:0, zIndex:10,
-        background:'linear-gradient(180deg,rgba(0,0,0,.65) 0%,transparent 100%)',
-        padding:'max(env(safe-area-inset-top,12px),12px) 12px 24px',
+        background:'linear-gradient(180deg,rgba(0,0,0,.7) 0%,transparent 100%)',
+        padding:'max(env(safe-area-inset-top,12px),12px) 12px 28px',
         display:'flex', alignItems:'center', justifyContent:'space-between',
       }}>
         <button onClick={onClose} style={{
-          width:48, height:48, display:'flex', alignItems:'center', justifyContent:'center',
-          background:'rgba(0,0,0,.35)', backdropFilter:'blur(4px)',
-          border:'none', borderRadius:99, color:'white', fontSize:22,
-          cursor:'pointer', WebkitTapHighlightColor:'transparent',
+          width:48, height:48, borderRadius:'50%', background:'rgba(0,0,0,.4)',
+          border:'none', color:'white', fontSize:24, cursor:'pointer',
+          display:'flex', alignItems:'center', justifyContent:'center',
+          WebkitTapHighlightColor:'transparent',
         }}>✕</button>
 
-        <div style={{ color:'rgba(255,255,255,.8)', fontSize:13,
-          fontFamily:'var(--font)', fontWeight:500, textAlign:'center' }}>
-          {error ? '' : 'Position document in frame'}
-        </div>
+        <span style={{ color:'rgba(255,255,255,.85)', fontSize:13,
+          fontFamily:'var(--font)', fontWeight:500 }}>
+          {error ? '' : ready ? 'Position document — tap to capture' : 'Starting camera…'}
+        </span>
 
         <button onClick={toggleTorch} style={{
-          width:48, height:48, display:'flex', alignItems:'center', justifyContent:'center',
-          background: torch ? 'rgba(255,208,60,.2)' : 'rgba(0,0,0,.35)',
-          backdropFilter:'blur(4px)',
-          border: torch ? '1.5px solid rgba(255,208,60,.6)' : 'none',
-          borderRadius:99, color: torch ? '#FFD060' : 'white', fontSize:20,
-          cursor:'pointer', WebkitTapHighlightColor:'transparent',
+          width:48, height:48, borderRadius:'50%',
+          background: torch ? 'rgba(255,210,60,.25)' : 'rgba(0,0,0,.4)',
+          border: torch ? '1.5px solid rgba(255,210,60,.7)' : 'none',
+          color: torch ? '#FFD03C' : 'white', fontSize:20, cursor:'pointer',
+          display:'flex', alignItems:'center', justifyContent:'center',
+          WebkitTapHighlightColor:'transparent',
         }}>⚡</button>
       </div>
 
-      {/* Error state */}
+      {/* Error */}
       {error && (
         <div style={{ position:'absolute', inset:0, zIndex:15,
           display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
-          padding:'32px', textAlign:'center' }}>
-          <div style={{ fontSize:48, marginBottom:16 }}>📷</div>
-          <p style={{ color:'white', fontSize:15, marginBottom:8, fontFamily:'var(--font)' }}>{error}</p>
+          padding:'32px', textAlign:'center', background:'rgba(0,0,0,.85)' }}>
+          <div style={{ fontSize:52, marginBottom:16 }}>📷</div>
+          <p style={{ color:'white', fontSize:15, marginBottom:24,
+            fontFamily:'var(--font)', lineHeight:1.6 }}>{error}</p>
           <button onClick={onClose} style={{
-            marginTop:16, padding:'12px 24px', borderRadius:99,
-            background:'white', color:'#333', border:'none', fontSize:14,
-            cursor:'pointer', fontFamily:'var(--font)', fontWeight:600,
+            padding:'13px 28px', borderRadius:99, background:'white',
+            color:'#333', border:'none', fontSize:15, cursor:'pointer',
+            fontFamily:'var(--font)', fontWeight:600,
           }}>Go Back</button>
         </div>
       )}
 
-      {/* Document corner guides */}
+      {/* Corner guide brackets */}
       {!error && (
         <div style={{ position:'absolute', inset:0, zIndex:8, pointerEvents:'none' }}>
           {[
-            { top:'14%',   left:'8%',   borderTop:'2.5px solid rgba(255,255,255,.75)', borderLeft:'2.5px solid rgba(255,255,255,.75)' },
-            { top:'14%',   right:'8%',  borderTop:'2.5px solid rgba(255,255,255,.75)', borderRight:'2.5px solid rgba(255,255,255,.75)' },
-            { bottom:'24%',left:'8%',   borderBottom:'2.5px solid rgba(255,255,255,.75)', borderLeft:'2.5px solid rgba(255,255,255,.75)' },
-            { bottom:'24%',right:'8%',  borderBottom:'2.5px solid rgba(255,255,255,.75)', borderRight:'2.5px solid rgba(255,255,255,.75)' },
+            { top:'13%',   left:'7%',   borderTop:'3px solid rgba(255,255,255,.8)', borderLeft:'3px solid rgba(255,255,255,.8)' },
+            { top:'13%',   right:'7%',  borderTop:'3px solid rgba(255,255,255,.8)', borderRight:'3px solid rgba(255,255,255,.8)' },
+            { bottom:'23%',left:'7%',   borderBottom:'3px solid rgba(255,255,255,.8)', borderLeft:'3px solid rgba(255,255,255,.8)' },
+            { bottom:'23%',right:'7%',  borderBottom:'3px solid rgba(255,255,255,.8)', borderRight:'3px solid rgba(255,255,255,.8)' },
           ].map((s, i) => (
-            <div key={i} style={{ position:'absolute', width:32, height:32, ...s }} />
+            <div key={i} style={{ position:'absolute', width:34, height:34, ...s }} />
           ))}
         </div>
       )}
 
-      {/* Bottom shutter — large, low, thumb-friendly */}
-      {ready && !error && (
-        <div style={{
-          position:'absolute', bottom:0, left:0, right:0, zIndex:10,
-          paddingBottom:'max(env(safe-area-inset-bottom,0px),24px)',
-          paddingTop:24,
-          background:'linear-gradient(0deg,rgba(0,0,0,.7) 0%,transparent 100%)',
-          display:'flex', flexDirection:'column', alignItems:'center', gap:14,
-        }}>
-          <span style={{ color:'rgba(255,255,255,.5)', fontSize:12,
-            fontFamily:'var(--font)', letterSpacing:'.04em' }}>
-            TAP TO CAPTURE
-          </span>
-
-          {/* Outer ring + inner disc — Adobe Scan style */}
-          <button
-            onClick={shoot}
-            style={{
-              width:80, height:80, borderRadius:'50%',
-              border:'3px solid rgba(255,255,255,.9)',
-              background:'transparent', cursor:'pointer',
-              display:'flex', alignItems:'center', justifyContent:'center',
-              WebkitTapHighlightColor:'transparent', touchAction:'manipulation',
-              transition:'transform .12s, border-color .12s',
-              position:'relative',
-            }}
-            onTouchStart={e => { e.currentTarget.style.transform='scale(.9)'; e.currentTarget.style.borderColor='var(--accent)'; }}
-            onTouchEnd={e => { e.currentTarget.style.transform='scale(1)'; e.currentTarget.style.borderColor='rgba(255,255,255,.9)'; }}
-          >
-            <div style={{
-              width:62, height:62, borderRadius:'50%',
-              background:'white',
-              boxShadow:'0 2px 12px rgba(0,0,0,.4)',
-            }} />
-          </button>
-        </div>
-      )}
-
-      {/* "Waiting for camera" state */}
+      {/* Loading spinner */}
       {!ready && !error && (
-        <div style={{ position:'absolute', inset:0, zIndex:15, display:'flex',
+        <div style={{ position:'absolute', inset:0, zIndex:14, display:'flex',
           alignItems:'center', justifyContent:'center' }}>
           <div style={{ textAlign:'center' }}>
-            <div className="spin" style={{ width:36, height:36,
-              border:'2px solid rgba(255,255,255,.15)', borderTopColor:'white',
-              borderRadius:'50%', margin:'0 auto 12px' }} />
+            <div className="spin" style={{ width:36, height:36, margin:'0 auto 12px',
+              border:'2px solid rgba(255,255,255,.15)', borderTopColor:'white', borderRadius:'50%' }} />
             <p style={{ color:'rgba(255,255,255,.5)', fontSize:13,
               fontFamily:'var(--font)' }}>Starting camera…</p>
           </div>
+        </div>
+      )}
+
+      {/* Shutter button area */}
+      {ready && !error && (
+        <div style={{
+          position:'absolute', bottom:0, left:0, right:0, zIndex:10,
+          paddingBottom:'max(env(safe-area-inset-bottom,0px),28px)', paddingTop:20,
+          background:'linear-gradient(0deg,rgba(0,0,0,.72) 0%,transparent 100%)',
+          display:'flex', flexDirection:'column', alignItems:'center', gap:12,
+        }}>
+          <p style={{ color:'rgba(255,255,255,.45)', fontSize:11,
+            fontFamily:'var(--font)', letterSpacing:'.08em', textTransform:'uppercase' }}>
+            Tap to capture
+          </p>
+          <button
+            onPointerDown={e => { e.currentTarget.style.transform='scale(.89)'; }}
+            onPointerUp={e => { e.currentTarget.style.transform='scale(1)'; shoot(); }}
+            onPointerCancel={e => { e.currentTarget.style.transform='scale(1)'; }}
+            style={{
+              width:82, height:82, borderRadius:'50%',
+              border:'4px solid rgba(255,255,255,.92)',
+              background:'transparent', cursor:'pointer',
+              display:'flex', alignItems:'center', justifyContent:'center',
+              WebkitTapHighlightColor:'transparent',
+              transition:'transform .1s cubic-bezier(.25,.46,.45,.94)',
+            }}>
+            <div style={{ width:64, height:64, borderRadius:'50%', background:'white',
+              boxShadow:'0 2px 12px rgba(0,0,0,.35)' }} />
+          </button>
         </div>
       )}
     </div>
@@ -775,17 +718,19 @@ export default function ScannerPage() {
     if (!folder)        { setShowFolder(true); return; }
     setUploading(true); setError('');
 
-     try {
-      let blob, ext;
+    try {
+      let blob, ext, mimeType;
 
       if (outputFmt === 'pdf') {
         blob     = await buildPDF(pages);
         ext      = '.pdf';
+        mimeType = 'application/pdf';
       } else {
         // For image formats: if multi-page, build a PDF anyway (can't merge to one JPG/PNG)
         if (pages.length > 1) {
           blob     = await buildPDF(pages);
           ext      = '.pdf';
+          mimeType = 'application/pdf';
         } else {
           const dataUrl = pages[0].processed || pages[0].original;
           const q       = outputFmt === 'jpg' ? 'image/jpeg' : 'image/png';
@@ -794,8 +739,9 @@ export default function ScannerPage() {
           canvas.width  = img.naturalWidth  || img.width;
           canvas.height = img.naturalHeight || img.height;
           canvas.getContext('2d').drawImage(img, 0, 0);
-          blob = await new Promise(r => canvas.toBlob(r, q, 0.98));
-          ext = outputFmt === 'jpg' ? '.jpg' : '.png';
+          blob     = await new Promise(r => canvas.toBlob(r, q, 0.98));
+          ext      = outputFmt === 'jpg' ? '.jpg' : '.png';
+          mimeType = q;
         }
       }
 
@@ -882,7 +828,7 @@ export default function ScannerPage() {
   }
 
   return (
-    <div style={{ height:'100dvh', background:'#111',
+    <div style={{ height:'100dvh', height:'100vh', background:'#111',
       display:'flex', flexDirection:'column', overflow:'hidden',
       paddingBottom:'var(--bottom-bar-h)' }}>
       <Navbar darkBg />
@@ -927,6 +873,7 @@ export default function ScannerPage() {
               style={{
                 maxWidth:'100%',
                 maxHeight:'calc(100dvh - 310px)',
+                maxHeight:'calc(100vh - 310px)',
                 objectFit:'contain', borderRadius:7,
                 boxShadow:'0 6px 32px rgba(0,0,0,.65)', display:'block',
               }} />
