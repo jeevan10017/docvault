@@ -80,7 +80,7 @@ router.get('/file/:fileId/download', requireTokens, async (req, res) => {
 
     // Set headers so the browser / native share knows what it's receiving
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `attachment; filename="${safeName.replace(/"/g, '\')}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName.replace(/"/g, "'")}"`);
     if (meta.size) res.setHeader('Content-Length', meta.size);
     // Allow browser to cache for 5 minutes (reduces repeat downloads)
     res.setHeader('Cache-Control', 'private, max-age=300');
