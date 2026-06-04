@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { BASE } from '../utils/api';
@@ -47,10 +47,100 @@ function Spinner() {
   );
 }
 
-// ── Document detail bottom sheet ───────────────────────────────────────────────
-function DocSheet({ file, onClose }) {
+// ── Document detail + share bottom sheet ──────────────────────────────────────
+function DocSheet({ file, getAuthHeader, onClose }) {
   const isPDF   = file.mimeType === 'application/pdf';
   const isImage = file.mimeType?.startsWith('image/');
+
+  // Share state machine: idle → downloading → sharing → done | error
+  const [shareState, setShareState] = useState('idle'); // idle|downloading|sharing|done|error
+  const [shareError, setShareError] = useState('');
+  const [progress,   setProgress]   = useState(0); // 0-100
+
+  // Can this browser share files natively?
+  const canNativeShare = typeof navigator.share === 'function' &&
+    typeof navigator.canShare === 'function';
+
+  async function handleShare() {
+    setShareState('downloading');
+    setShareError('');
+    setProgress(0);
+
+    try {
+      const authHeader = await getAuthHeader();
+
+      // Stream file from backend → Drive → browser as blob
+      const response = await fetch(
+        `${BASE}/drive/file/${file.id}/download?filename=${encodeURIComponent(file.name)}`,
+        { headers: { Authorization: authHeader } }
+      );
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ error: response.statusText }));
+        throw new Error(err.error || 'Download failed');
+      }
+
+      // Stream with progress tracking
+      const contentLength = parseInt(response.headers.get('Content-Length') || file.size || '0');
+      const reader        = response.body.getReader();
+      const chunks        = [];
+      let   received      = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        if (contentLength > 0) setProgress(Math.round((received / contentLength) * 100));
+      }
+
+      const blob = new Blob(chunks, { type: file.mimeType || 'application/octet-stream' });
+      const shareFile = new File([blob], file.name, { type: blob.type });
+
+      setShareState('sharing');
+
+      // Try native share sheet first (WhatsApp, Telegram, AirDrop, Email, etc.)
+      if (canNativeShare && navigator.canShare({ files: [shareFile] })) {
+        await navigator.share({
+          files: [shareFile],
+          title: file.name,
+        });
+        setShareState('done');
+        setTimeout(() => setShareState('idle'), 2000);
+      } else {
+        // Fallback: trigger a browser download
+        const url = URL.createObjectURL(blob);
+        const a   = document.createElement('a');
+        a.href     = url;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setShareState('done');
+        setTimeout(() => setShareState('idle'), 2000);
+      }
+    } catch (err) {
+      // User cancelled native share — not an error
+      if (err.name === 'AbortError') {
+        setShareState('idle');
+        return;
+      }
+      console.error('Share error:', err);
+      setShareError(err.message || 'Share failed');
+      setShareState('error');
+    }
+  }
+
+  const shareLabel = {
+    idle:        '📤 Share / Download',
+    downloading: `Downloading… ${progress > 0 ? progress + '%' : ''}`,
+    sharing:     'Opening share sheet…',
+    done:        '✓ Done!',
+    error:       '⚠ Try again',
+  }[shareState];
+
+  const shareActive = shareState === 'downloading' || shareState === 'sharing';
 
   return (
     <>
@@ -58,52 +148,134 @@ function DocSheet({ file, onClose }) {
       <div className="sheet">
         <div className="sheet-handle" />
         <div className="sheet-header">
-          <span style={{ fontWeight: 600, fontSize: 15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '75%' }}>
+          <span style={{ fontWeight: 600, fontSize: 15, overflow: 'hidden',
+            textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '75%' }}>
             {file.name}
           </span>
-          <button className="btn btn-ghost" onClick={onClose}
-            style={{ padding: '4px 8px', fontSize: 20, lineHeight: 1, minHeight: 32, color: 'var(--ink-4)' }}>×</button>
+          <button onClick={onClose}
+            style={{ background: 'none', border: 'none', fontSize: 22, cursor: 'pointer',
+              color: 'var(--ink-4)', padding: '4px 8px', minHeight: 44, lineHeight: 1 }}>×</button>
         </div>
+
         <div className="sheet-body">
-          {/* Icon */}
+          {/* File icon */}
           <div style={{
-            width: 64, height: 64, borderRadius: 14, margin: '0 auto 20px',
+            width: 68, height: 68, borderRadius: 16, margin: '0 auto 18px',
             background: isPDF ? 'var(--red-bg)' : isImage ? 'var(--blue-bg)' : 'var(--sand)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 30,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32,
           }}>
             {isPDF ? '📄' : isImage ? '🖼️' : '📁'}
           </div>
 
           {/* Meta rows */}
           {[
-            { label: 'File name', value: file.name },
-            { label: 'Type',      value: file.mimeType },
-            { label: 'Size',      value: formatSize(file.size) },
-            { label: 'Uploaded',  value: formatDate(file.createdTime) },
+            { label: 'Name',     value: file.name },
+            { label: 'Type',     value: isPDF ? 'PDF Document' : isImage ? 'Image' : file.mimeType },
+            { label: 'Size',     value: formatSize(file.size) },
+            { label: 'Saved on', value: formatDate(file.createdTime) },
           ].map(row => row.value ? (
             <div key={row.label} style={{
               display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
               padding: '11px 0', borderBottom: '1px solid var(--border-soft)',
             }}>
-              <span style={{ fontSize: 13, color: 'var(--ink-4)', minWidth: 80 }}>{row.label}</span>
-              <span style={{ fontSize: 13, color: 'var(--ink-2)', fontWeight: 500, textAlign: 'right', maxWidth: '65%', wordBreak: 'break-all' }}>{row.value}</span>
+              <span style={{ fontSize: 13, color: 'var(--ink-4)', minWidth: 72 }}>{row.label}</span>
+              <span style={{ fontSize: 13, color: 'var(--ink-2)', fontWeight: 500,
+                textAlign: 'right', maxWidth: '65%', wordBreak: 'break-all' }}>{row.value}</span>
             </div>
           ) : null)}
 
-          {/* Actions */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 24 }}>
+          {/* Download progress bar */}
+          {shareState === 'downloading' && (
+            <div style={{ marginTop: 16, marginBottom: -8 }}>
+              <div style={{
+                height: 4, background: 'var(--sand)', borderRadius: 2, overflow: 'hidden',
+              }}>
+                <div style={{
+                  height: '100%', borderRadius: 2,
+                  background: 'var(--accent)',
+                  width: progress > 0 ? `${progress}%` : '30%',
+                  transition: progress > 0 ? 'width .3s ease' : 'none',
+                  animation: progress === 0 ? 'indeterminate 1.4s ease infinite' : 'none',
+                }} />
+              </div>
+            </div>
+          )}
+
+          {shareError && (
+            <p style={{ fontSize: 12, color: 'var(--red)', marginTop: 12, textAlign: 'center' }}>
+              {shareError}
+            </p>
+          )}
+
+          {/* Action buttons */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 22 }}>
+
+            {/* Share / Download — primary action */}
+            <button
+              onClick={handleShare}
+              disabled={shareActive}
+              style={{
+                width: '100%', padding: '14px', borderRadius: 13,
+                background: shareState === 'done' ? 'var(--green)' : shareActive ? 'var(--accent-light)' : 'var(--accent)',
+                color: 'white', border: 'none', fontSize: 15, fontWeight: 700,
+                cursor: shareActive ? 'default' : 'pointer',
+                fontFamily: 'var(--font)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                minHeight: 52, WebkitTapHighlightColor: 'transparent',
+                transition: 'background .2s',
+              }}>
+              {shareActive
+                ? <><span className="spin" style={{ display: 'inline-block', width: 16, height: 16,
+                    border: '2px solid rgba(255,255,255,.3)', borderTopColor: 'white', borderRadius: '50%' }} />
+                    {shareLabel}</>
+                : shareLabel
+              }
+            </button>
+
+            {/* Open in Drive */}
             {file.webViewLink && (
               <a href={file.webViewLink} target="_blank" rel="noopener noreferrer"
-                className="btn btn-primary btn-full" style={{ fontSize: 15, padding: '13px', textDecoration: 'none' }}>
+                style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  padding: '13px', borderRadius: 13,
+                  border: '1.5px solid var(--border)', background: 'white',
+                  color: 'var(--ink-2)', textDecoration: 'none', fontSize: 14,
+                  fontFamily: 'var(--font)', fontWeight: 500, minHeight: 50,
+                  WebkitTapHighlightColor: 'transparent',
+                }}>
                 Open in Google Drive ↗
               </a>
             )}
-            <button className="btn btn-secondary btn-full" onClick={onClose} style={{ fontSize: 14 }}>
+
+            <button onClick={onClose}
+              style={{
+                padding: '12px', borderRadius: 13, border: 'none', background: 'none',
+                fontSize: 14, color: 'var(--ink-4)', cursor: 'pointer',
+                fontFamily: 'var(--font)', minHeight: 44,
+                WebkitTapHighlightColor: 'transparent',
+              }}>
               Close
             </button>
           </div>
+
+          {/* Explanation for desktop users */}
+          {!canNativeShare && (
+            <p style={{ fontSize: 11, color: 'var(--ink-4)', textAlign: 'center',
+              marginTop: 8, lineHeight: 1.5 }}>
+              On mobile, Share opens WhatsApp, Telegram, AirDrop and more.
+              On desktop, the file is downloaded directly.
+            </p>
+          )}
         </div>
       </div>
+
+      <style>{`
+        @keyframes indeterminate {
+          0%   { margin-left: -30%; width: 30%; }
+          60%  { margin-left: 100%; width: 30%; }
+          100% { margin-left: 100%; width: 30%; }
+        }
+      `}</style>
     </>
   );
 }
@@ -120,9 +292,7 @@ export default function Dashboard() {
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [activeTab, setActiveTab] = useState('all'); // 'all' | 'folders' | 'recent'
 
-  useEffect(() => { fetchFiles(); }, []);
-
-  async function fetchFiles() {
+  const fetchFiles = useCallback(async () => {
     setLoading(true); setError('');
     try {
       const h = await getAuthHeader();
@@ -135,7 +305,9 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [getAuthHeader]);
+
+  useEffect(() => { fetchFiles(); }, [fetchFiles]);
 
   const isFolder = f => f.mimeType === 'application/vnd.google-apps.folder';
   const allDocs    = files.filter(f => !isFolder(f));
@@ -325,21 +497,25 @@ export default function Dashboard() {
                     const isImage = file.mimeType?.startsWith('image/');
                     return (
                       <div key={file.id} className="card fade-in"
-                        onClick={() => setSelectedDoc(file)}
-                        style={{ padding: '13px 14px', display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer', activeBackground: 'var(--sand)' }}
+                        style={{ padding: '12px 12px', display: 'flex', alignItems: 'center', gap: 10 }}
                       >
-                        {/* Icon */}
-                        <div style={{
-                          width: 42, height: 42, minWidth: 42, borderRadius: 10,
-                          background: isPDF ? 'var(--red-bg)' : isImage ? 'var(--blue-bg)' : 'var(--sand)',
-                          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20,
-                        }}>
+                        {/* Icon — tapping opens detail sheet */}
+                        <div
+                          onClick={() => setSelectedDoc(file)}
+                          style={{
+                            width: 42, height: 42, minWidth: 42, borderRadius: 10,
+                            background: isPDF ? 'var(--red-bg)' : isImage ? 'var(--blue-bg)' : 'var(--sand)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: 20, cursor: 'pointer', flexShrink: 0,
+                          }}>
                           {isPDF ? '📄' : isImage ? '🖼️' : '📁'}
                         </div>
 
-                        {/* Info */}
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 2 }}>
+                        {/* Info — tapping opens detail sheet */}
+                        <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }}
+                          onClick={() => setSelectedDoc(file)}>
+                          <div style={{ fontSize: 13, fontWeight: 500, overflow: 'hidden',
+                            textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 2 }}>
                             {file.name}
                           </div>
                           <div style={{ fontSize: 11, color: 'var(--ink-4)', display: 'flex', gap: 8 }}>
@@ -348,8 +524,20 @@ export default function Dashboard() {
                           </div>
                         </div>
 
-                        {/* Chevron */}
-                        <span style={{ color: 'var(--ink-4)', fontSize: 16, lineHeight: 1 }}>›</span>
+                        {/* Share button — direct action, no sheet needed */}
+                        <button
+                          onClick={() => setSelectedDoc(file)}
+                          style={{
+                            flexShrink: 0,
+                            padding: '7px 12px', borderRadius: 9,
+                            background: 'var(--accent)', color: 'white',
+                            border: 'none', cursor: 'pointer', fontSize: 12,
+                            fontFamily: 'var(--font)', fontWeight: 600,
+                            minHeight: 36, display: 'flex', alignItems: 'center', gap: 4,
+                            WebkitTapHighlightColor: 'transparent',
+                          }}>
+                          ↑ Share
+                        </button>
                       </div>
                     );
                   })}
@@ -370,7 +558,7 @@ export default function Dashboard() {
 
       {/* Document detail sheet */}
       {selectedDoc && (
-        <DocSheet file={selectedDoc} onClose={() => setSelectedDoc(null)} />
+        <DocSheet file={selectedDoc} getAuthHeader={getAuthHeader} onClose={() => setSelectedDoc(null)} />
       )}
     </div>
   );

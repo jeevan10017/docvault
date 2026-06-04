@@ -912,7 +912,7 @@ export default function ScannerPage() {
   }
 
   return (
-    <div style={{ height:'100dvh', height:'100vh', background:'#111',
+    <div style={{ height:'100vh', background:'#111',
       display:'flex', flexDirection:'column', overflow:'hidden',
       paddingBottom:'var(--bottom-bar-h)' }}>
       <Navbar darkBg />
@@ -948,7 +948,7 @@ export default function ScannerPage() {
             padding:'10px', minHeight:0, position:'relative' }}>
             <img src={activePage.processed||activePage.original} alt="current page"
               style={{
-                maxWidth:'100%', maxHeight:'calc(100dvh - 310px)', maxHeight:'calc(100vh - 310px)',
+                maxWidth:'100%', maxHeight:'calc(100vh - 310px)',
                 objectFit:'contain', borderRadius:7, boxShadow:'0 6px 32px rgba(0,0,0,.65)', display:'block',
               }} />
             <button onClick={() => setCropIndex(selected)} style={{

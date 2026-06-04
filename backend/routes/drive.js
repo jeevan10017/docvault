@@ -45,4 +45,63 @@ router.post('/folders', requireTokens, async (req, res) => {
   }
 });
 
+
+/** GET /drive/file/:fileId/download
+ *  Streams the actual file bytes from Google Drive through the backend.
+ *  This is needed because Drive API calls are authenticated — the browser
+ *  cannot call Drive directly with the user's token.
+ *
+ *  Query params:
+ *    filename  (optional) — sets Content-Disposition filename
+ *    mimeType  (optional) — overrides Content-Type
+ */
+router.get('/file/:fileId/download', requireTokens, async (req, res) => {
+  const { fileId } = req.params;
+  const { filename, mimeType } = req.query;
+
+  try {
+    const { getDriveClient } = require('../services/driveService');
+    const drive = getDriveClient(req.tokens);
+
+    // First fetch file metadata so we know the real name + mime type
+    let meta;
+    try {
+      const metaRes = await drive.files.get({
+        fileId,
+        fields: 'id,name,mimeType,size',
+      });
+      meta = metaRes.data;
+    } catch (e) {
+      return res.status(404).json({ error: 'File not found or not accessible.' });
+    }
+
+    const safeName    = filename || meta.name || 'document';
+    const contentType = mimeType  || meta.mimeType || 'application/octet-stream';
+
+    // Set headers so the browser / native share knows what it's receiving
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName.replace(/"/g, '\')}"`);
+    if (meta.size) res.setHeader('Content-Length', meta.size);
+    // Allow browser to cache for 5 minutes (reduces repeat downloads)
+    res.setHeader('Cache-Control', 'private, max-age=300');
+
+    // Stream file content directly to response
+    const fileRes = await drive.files.get(
+      { fileId, alt: 'media' },
+      { responseType: 'stream' }
+    );
+
+    fileRes.data
+      .on('error', (err) => {
+        console.error('Drive stream error:', err.message);
+        if (!res.headersSent) res.status(500).json({ error: 'Stream error' });
+      })
+      .pipe(res);
+
+  } catch (err) {
+    console.error('Download error:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
