@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { BASE } from '../utils/api';
@@ -120,30 +120,22 @@ export default function Dashboard() {
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [activeTab, setActiveTab] = useState('all'); // 'all' | 'folders' | 'recent'
 
-  const fetchFiles = useCallback(async () => {
-  setLoading(true);
-  setError('');
+  useEffect(() => { fetchFiles(); }, []);
 
-  try {
-    const h = await getAuthHeader();
-    const { data } = await axios.get(`${BASE}/drive/files`, {
-      headers: { Authorization: h },
-    });
-    setFiles(data.files || []);
-  } catch (err) {
-    setError(
-      err.response?.status === 401
+  async function fetchFiles() {
+    setLoading(true); setError('');
+    try {
+      const h = await getAuthHeader();
+      const { data } = await axios.get(`${BASE}/drive/files`, { headers: { Authorization: h } });
+      setFiles(data.files || []);
+    } catch (err) {
+      setError(err.response?.status === 401
         ? 'Session expired. Please sign in again.'
-        : err.response?.data?.error || 'Could not load files.'
-    );
-  } finally {
-    setLoading(false);
+        : err.response?.data?.error || 'Could not load files.');
+    } finally {
+      setLoading(false);
+    }
   }
-}, [getAuthHeader]);
-
-useEffect(() => {
-  fetchFiles();
-}, [fetchFiles]);
 
   const isFolder = f => f.mimeType === 'application/vnd.google-apps.folder';
   const allDocs    = files.filter(f => !isFolder(f));

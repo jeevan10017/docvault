@@ -1,10 +1,12 @@
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../hooks/useAuth';
 
 // This page is the redirect target after Google OAuth.
 // The backend encodes tokens in the URL hash — we parse them here.
 export default function AuthSuccess() {
   const navigate = useNavigate();
+  const { auth } = useAuth();
 
   useEffect(() => {
     const hash = window.location.hash.replace('#', '');

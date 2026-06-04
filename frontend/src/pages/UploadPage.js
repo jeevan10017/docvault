@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
@@ -353,7 +354,6 @@ export default function UploadPage() {
 
     if (!incoming.length) return;
 
-    // Snapshot current entries so we can calculate folder offsets correctly
     const currentEntries = entries;
     const folder         = lastFolder;
 
@@ -416,7 +416,6 @@ export default function UploadPage() {
         return prev;
       });
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entries, lastFolder]);
 
   function onFileInput(e) { addFiles(e.target.files); e.target.value = ''; }
