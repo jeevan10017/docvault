@@ -180,9 +180,70 @@ async function listDocVaultFiles(tokens, folderPath = '') {
   return res.data.files;
 }
 
+
+/**
+ * List ALL files inside DocVault — recursively traverses every subfolder,
+ * paginates through all pages of results.
+ * This finds files uploaded months or years ago.
+ * @param {string} searchQuery  optional name filter
+ */
+async function listAllDocVaultFiles(tokens, searchQuery = '') {
+  const drive = getDriveClient(tokens);
+
+  // Get DocVault root
+  let docVaultId;
+  try {
+    docVaultId = await getDocVaultRootId(drive);
+  } catch (e) {
+    console.error('listAllDocVaultFiles: could not get root', e.message);
+    return [];
+  }
+
+  const allFiles = [];
+
+  // Recursively collect files from a folder and all its subfolders
+  async function collectFromFolder(folderId) {
+    let pageToken = null;
+
+    do {
+      const params = {
+        ...LIST_OPTS,
+        q: `'${folderId}' in parents and trashed=false`,
+        fields: 'nextPageToken, files(id,name,mimeType,size,createdTime,webViewLink)',
+        orderBy: 'createdTime desc',
+        pageSize: 100,
+      };
+      if (pageToken) params.pageToken = pageToken;
+
+      const res = await drive.files.list(params);
+      const items = res.data.files || [];
+      pageToken = res.data.nextPageToken || null;
+
+      for (const item of items) {
+        if (item.mimeType === 'application/vnd.google-apps.folder') {
+          // Recurse into subfolder
+          await collectFromFolder(item.id);
+        } else {
+          // It's a real file — apply optional search filter
+          if (!searchQuery || item.name.toLowerCase().includes(searchQuery.toLowerCase())) {
+            allFiles.push(item);
+          }
+        }
+      }
+    } while (pageToken);
+  }
+
+  await collectFromFolder(docVaultId);
+
+  // Sort newest first
+  allFiles.sort((a, b) => new Date(b.createdTime) - new Date(a.createdTime));
+  return allFiles;
+}
+
 module.exports = {
   uploadFileToDrive,
   listDocVaultFiles,
+  listAllDocVaultFiles,
   listDocVaultFolders,
   createFolderPath,
   getDriveClient,

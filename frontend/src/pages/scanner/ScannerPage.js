@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import Navbar from '../../components/Navbar';
 import FolderSheet from '../../components/FolderSheet';
+import { ShareButton } from '../../components/ShareButton';
 import axios from 'axios';
 import { BASE } from '../../utils/api';
 import { getSequentialName, confirmUsed, sanitise } from '../../utils/naming';
@@ -772,17 +773,17 @@ export default function ScannerPage() {
   }, [addPage]);
 
   const handleCamera = useCallback((dataUrl) => {
-    const p = addPage(dataUrl);
+    const id = uid(); // generate id first, before any state update
     setShowCamera(false);
-    // Auto-open crop after shot — small delay to let pages state settle
-    setTimeout(() => {
-      setPages(prev => {
-        const idx = prev.findIndex(x => x.id === p.id);
-        if (idx >= 0) setCropIndex(idx);
-        return prev;
-      });
-    }, 60);
-  }, [addPage]);
+    setPages(prev => {
+      const newPage = { id, original: dataUrl, processed: dataUrl, filter: 'original' };
+      const next = [...prev, newPage];
+      // Schedule crop open after this render with the stable index
+      const idx = next.length - 1;
+      setTimeout(() => setCropIndex(idx), 30);
+      return next;
+    });
+  }, []);
 
   const applyCrop = useCallback((idx, croppedUrl) => {
     setPages(prev => prev.map((p, i) => i === idx ? { ...p, processed: croppedUrl } : p));
@@ -797,7 +798,10 @@ export default function ScannerPage() {
 
   const applyFilter = useCallback(async (idx, filter) => {
     const page = pages[idx];
-    const result = await applyFilterToDataUrl(page.processed, filter);
+    // ALWAYS apply to page.original — never to page.processed.
+    // Applying enhance to an already-enhanced image doubles the effect.
+    // Clicking "Original" must restore the true original, not re-encode the filtered version.
+    const result = await applyFilterToDataUrl(page.original, filter);
     setPages(prev => prev.map((p, i) => i === idx ? { ...p, processed: result, filter } : p));
   }, [pages]);
 
@@ -877,21 +881,32 @@ export default function ScannerPage() {
     return (
       <div className="page" style={{ background:'var(--cream)' }}>
         <Navbar />
-        <div style={{ maxWidth:440, margin:'0 auto', padding:'52px 20px', textAlign:'center' }}>
+        <div style={{ maxWidth:440, margin:'0 auto', padding:'48px 20px', textAlign:'center' }}>
           <div style={{ fontSize:60, marginBottom:16 }}>✅</div>
           <h2 style={{ marginBottom:8 }}>Saved to Drive!</h2>
-          <p style={{ fontFamily:'var(--mono)', fontSize:13, color:'var(--ink-3)', marginBottom:4 }}>
+          <p style={{ fontFamily:'var(--mono)', fontSize:13, color:'var(--ink-3)', marginBottom:4,
+            overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
             {uploadDone.fileName || uploadDone.name}
           </p>
           <p style={{ fontSize:12, color:'var(--ink-4)', marginBottom:28 }}>
             DocVault/{folder?.path}
           </p>
           <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+            {/* Share the saved file directly from success screen */}
+            {uploadDone.id && (
+              <ShareButton
+                file={uploadDone}
+                getAuthHeader={getAuthHeader}
+                variant="full"
+              />
+            )}
             {uploadDone.viewLink && (
               <a href={uploadDone.viewLink} target="_blank" rel="noopener noreferrer"
-                style={{ padding:'14px', borderRadius:14, background:'var(--accent)',
-                  color:'white', textDecoration:'none', fontSize:15, fontWeight:700,
-                  fontFamily:'var(--font)', display:'block' }}>
+                style={{ display:'flex', alignItems:'center', justifyContent:'center',
+                  padding:'13px', borderRadius:14,
+                  border:'1.5px solid var(--border)', background:'white',
+                  color:'var(--ink-2)', textDecoration:'none', fontSize:14,
+                  fontFamily:'var(--font)', fontWeight:500 }}>
                 Open in Drive ↗
               </a>
             )}
