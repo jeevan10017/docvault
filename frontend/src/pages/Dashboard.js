@@ -199,13 +199,7 @@ function FileViewer({ file: initialFile, getAuthHeader, onClose, onRenamed }) {
   return (
     <>
       <div className="sheet-backdrop" onClick={onClose} />
-      <div
-  className="sheet"
-  style={{
-    maxHeight: '96vh',
-    height: '96dvh'
-  }}
->
+      <div className="sheet" style={{ maxHeight:'96dvh', Height:'96vh' }}>
         <div className="sheet-handle" />
         {/* Header */}
         <div style={{ display:'flex', alignItems:'center', gap:8, padding:'12px 16px',
