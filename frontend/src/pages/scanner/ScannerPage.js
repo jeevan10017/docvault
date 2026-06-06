@@ -742,13 +742,15 @@ export default function ScannerPage() {
   const navigate          = useNavigate();
   const fileInputRef      = useRef(null);
 
-  const [pages,      setPages]      = useState([]);
-  const [selected,   setSelected]   = useState(0);
-  const [showCamera, setShowCamera] = useState(false);
-  const [cropIndex,  setCropIndex]  = useState(null);
-  const [showFolder, setShowFolder] = useState(false);
-  const [docName,    setDocName]    = useState('');
-  const [outputFmt,  setOutputFmt]  = useState('pdf');
+  const [pages,        setPages]        = useState([]);
+  const [selected,     setSelected]     = useState(0);
+  const [showCamera,   setShowCamera]   = useState(false);
+  const [cropIndex,    setCropIndex]    = useState(null);
+  // cropPending: true after camera capture until user does crop or skips
+  const [cropPending,  setCropPending]  = useState(false);
+  const [showFolder,   setShowFolder]   = useState(false);
+  const [docName,      setDocName]      = useState('');
+  const [outputFmt,    setOutputFmt]    = useState('pdf');
   const [folder,     setFolder]     = useState(() => {
     try { return JSON.parse(localStorage.getItem('dv_last_folder')); } catch { return null; }
   });
@@ -773,12 +775,12 @@ export default function ScannerPage() {
   }, [addPage]);
 
   const handleCamera = useCallback((dataUrl) => {
-    const id = uid(); // generate id first, before any state update
+    const id = uid();
     setShowCamera(false);
+    setCropPending(true); // block saving until crop is done or skipped
     setPages(prev => {
       const newPage = { id, original: dataUrl, processed: dataUrl, filter: 'original' };
       const next = [...prev, newPage];
-      // Schedule crop open after this render with the stable index
       const idx = next.length - 1;
       setTimeout(() => setCropIndex(idx), 30);
       return next;
@@ -788,6 +790,7 @@ export default function ScannerPage() {
   const applyCrop = useCallback((idx, croppedUrl) => {
     setPages(prev => prev.map((p, i) => i === idx ? { ...p, processed: croppedUrl } : p));
     setCropIndex(null);
+    setCropPending(false); // crop done — allow saving
   }, []);
 
   const deletePage = useCallback((idx) => {
@@ -821,8 +824,9 @@ export default function ScannerPage() {
   }, [pages.length]);
 
   async function saveAndUpload() {
-    if (!pages.length)  { setError('Add at least one page.'); return; }
-    if (!folder)        { setShowFolder(true); return; }
+    if (!pages.length)    { setError('Add at least one page.'); return; }
+    if (cropPending)      { setError('Please crop or skip the current page first.'); return; }
+    if (!folder)          { setShowFolder(true); return; }
     setUploading(true); setError('');
     try {
       let blob, ext, mimeType;
@@ -872,7 +876,16 @@ export default function ScannerPage() {
       <CropEditor
         page={pages[cropIndex]}
         onDone={url => applyCrop(cropIndex, url)}
-        onCancel={() => setCropIndex(null)}
+        onCancel={() => {
+          // If this was from a camera capture (cropPending), ask to skip or go back
+          if (cropPending) {
+            // Show a native confirm — if they cancel, just close crop but keep pending
+            // Actually: cancel = keep cropPending so save is still blocked
+            // User must either: re-open crop, or use the "Skip crop" button in bottom bar
+          }
+          setCropIndex(null);
+          // Note: cropPending stays true so Save is blocked — user must tap Skip Crop
+        }}
       />
     );
   }
@@ -1074,6 +1087,37 @@ export default function ScannerPage() {
               <p style={{ fontSize:11, color:'var(--amber)', marginBottom:6 }}>
                 ⚠️ Multiple pages will always be saved as PDF
               </p>
+            )}
+            {/* Crop pending — must crop or skip before saving */}
+            {cropPending && (
+              <div style={{ background:'var(--amber-bg)', border:'1px solid #f0cc82',
+                borderRadius:10, padding:'10px 12px', marginBottom:9,
+                display:'flex', alignItems:'center', justifyContent:'space-between', gap:10 }}>
+                <div>
+                  <p style={{ fontSize:13, color:'var(--amber)', fontWeight:600, marginBottom:2 }}>
+                    ✂️ Crop pending
+                  </p>
+                  <p style={{ fontSize:11, color:'var(--amber)', opacity:.85 }}>
+                    Tap the crop button or skip to save as-is.
+                  </p>
+                </div>
+                <div style={{ display:'flex', gap:6, flexShrink:0 }}>
+                  <button
+                    onClick={() => { const idx = pages.length - 1; setCropIndex(idx); }}
+                    style={{ padding:'7px 12px', borderRadius:8, background:'var(--accent)',
+                      color:'white', border:'none', fontSize:12, fontWeight:600,
+                      cursor:'pointer', fontFamily:'var(--font)', minHeight:34 }}>
+                    ✂️ Crop
+                  </button>
+                  <button
+                    onClick={() => setCropPending(false)}
+                    style={{ padding:'7px 12px', borderRadius:8, background:'white',
+                      color:'var(--ink-3)', border:'1px solid var(--border)',
+                      fontSize:12, cursor:'pointer', fontFamily:'var(--font)', minHeight:34 }}>
+                    Skip
+                  </button>
+                </div>
+              </div>
             )}
             {error && <p style={{ fontSize:12, color:'var(--red)', marginBottom:6 }}>⚠ {error}</p>}
             <button onClick={saveAndUpload} disabled={uploading} style={{

@@ -1,11 +1,14 @@
-import React, { useState, useEffect, useCallback } from 'react';
+/* eslint-disable react-hooks/exhaustive-deps */
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { BASE } from '../utils/api';
 import { useAuth } from '../hooks/useAuth';
 import Navbar from '../components/Navbar';
 import { ShareButton } from '../components/ShareButton';
+import { cache } from '../utils/localCache';
 
+// ─── helpers ──────────────────────────────────────────────────────────────────
 const FOLDER_META = {
   Identity:  { color:'#6B4FA0', bg:'#F2EEFB', icon:'🪪' },
   Education: { color:'#9C6B1A', bg:'#FBF3E4', icon:'🎓' },
@@ -16,28 +19,106 @@ const FOLDER_META = {
   Bills:     { color:'#7A5C1A', bg:'#FBF3E4', icon:'📋' },
   Other:     { color:'#6B6057', bg:'#EDE8DF', icon:'📁' },
 };
-
 function getFolderMeta(name) {
   return FOLDER_META[(name||'').split('/')[0]] || FOLDER_META.Other;
 }
-function formatSize(bytes) {
-  if (!bytes) return '';
-  const n = parseInt(bytes);
-  if (n < 1024) return n + ' B';
-  if (n < 1048576) return (n/1024).toFixed(0) + ' KB';
-  return (n/1048576).toFixed(1) + ' MB';
+function formatSize(b) {
+  if (!b) return '';
+  const n = parseInt(b);
+  if (n<1024) return n+' B';
+  if (n<1048576) return (n/1024).toFixed(0)+' KB';
+  return (n/1048576).toFixed(1)+' MB';
 }
 function formatDate(iso) {
   if (!iso) return '';
-  return new Date(iso).toLocaleDateString('en-IN', { day:'numeric', month:'short', year:'numeric' });
+  return new Date(iso).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'});
 }
 
+// ─── Skeleton card ────────────────────────────────────────────────────────────
+function SkeletonCard() {
+  return (
+    <div style={{ display:'flex', gap:10, padding:'12px', background:'white',
+      borderRadius:14, border:'1px solid var(--border-soft)', marginBottom:8 }}>
+      <div style={{ width:56, height:68, borderRadius:8, background:'var(--sand)',
+        animation:'pulse 1.4s ease infinite', flexShrink:0 }} />
+      <div style={{ flex:1, display:'flex', flexDirection:'column', gap:8, justifyContent:'center' }}>
+        <div style={{ height:13, borderRadius:4, background:'var(--sand)',
+          animation:'pulse 1.4s ease infinite', width:'70%' }} />
+        <div style={{ height:11, borderRadius:4, background:'var(--sand)',
+          animation:'pulse 1.4s ease infinite', width:'45%' }} />
+      </div>
+    </div>
+  );
+}
 
-
-// ─── Document detail sheet ────────────────────────────────────────────────────
-function DocSheet({ file, getAuthHeader, onClose }) {
+// ─── File thumbnail ───────────────────────────────────────────────────────────
+function FileThumbnail({ file, getAuthHeader }) {
+  const [src, setSrc] = useState(null);
   const isPDF   = file.mimeType === 'application/pdf';
   const isImage = file.mimeType?.startsWith('image/');
+
+  useEffect(() => {
+    if (!isImage && !isPDF) return;
+    // Check cache first
+    const cached = cache.getThumb(file.id);
+    if (cached) { setSrc(cached); return; }
+    if (!isImage) return; // only fetch thumbs for images
+
+    // Fetch via thumbnail endpoint
+    getAuthHeader().then(h => {
+      fetch(`${BASE}/drive/file/${file.id}/thumbnail`, { headers: { Authorization: h } })
+        .then(r => r.ok ? r.blob() : null)
+        .then(blob => {
+          if (!blob) return;
+          const reader = new FileReader();
+          reader.onload = e => {
+            const b64 = e.target.result;
+            cache.setThumb(file.id, b64);
+            setSrc(b64);
+          };
+          reader.readAsDataURL(blob);
+        })
+        .catch(() => {});
+    });
+  }, [file.id, isImage, isPDF, getAuthHeader]);
+
+  return (
+    <div style={{ width:56, height:68, borderRadius:8, overflow:'hidden', flexShrink:0,
+      background: isPDF ? 'var(--red-bg)' : 'var(--blue-bg)',
+      display:'flex', alignItems:'center', justifyContent:'center' }}>
+      {src
+        ? <img src={src} alt="" style={{ width:'100%', height:'100%', objectFit:'cover' }} />
+        : <span style={{ fontSize:26 }}>{isPDF ? '📄' : isImage ? '🖼️' : '📁'}</span>
+      }
+    </div>
+  );
+}
+
+// ─── Rename Sheet ─────────────────────────────────────────────────────────────
+function RenameSheet({ file, getAuthHeader, onRenamed, onClose }) {
+  const [val,    setVal]    = useState(file.name.replace(/\.[^.]+$/, ''));
+  const [saving, setSaving] = useState(false);
+  const [err,    setErr]    = useState('');
+  const inputRef = useRef();
+
+  useEffect(() => { setTimeout(() => inputRef.current?.focus(), 80); }, []);
+
+  async function save() {
+    const ext  = file.name.match(/(\.[^.]+)$/)?.[1] || '';
+    const name = (val.trim() || file.name.replace(/\.[^.]+$/, '')) + ext;
+    setSaving(true); setErr('');
+    try {
+      const h = await getAuthHeader();
+      const { data } = await axios.patch(
+        `${BASE}/drive/file/${file.id}/rename`,
+        { name },
+        { headers: { Authorization: h } }
+      );
+      onRenamed(data.file);
+    } catch (e) {
+      setErr(e.response?.data?.error || e.message);
+    } finally { setSaving(false); }
+  }
 
   return (
     <>
@@ -45,77 +126,351 @@ function DocSheet({ file, getAuthHeader, onClose }) {
       <div className="sheet">
         <div className="sheet-handle" />
         <div className="sheet-header">
-          <span style={{ fontWeight:600, fontSize:15, overflow:'hidden',
-            textOverflow:'ellipsis', whiteSpace:'nowrap', maxWidth:'75%' }}>
-            {file.name}
-          </span>
-          <button onClick={onClose} style={{
-            background:'none', border:'none', fontSize:22, cursor:'pointer',
-            color:'var(--ink-4)', padding:'4px 10px', minHeight:44, lineHeight:1,
-          }}>×</button>
+          <span style={{ fontWeight:600, fontSize:15 }}>Rename</span>
+          <button onClick={onClose} style={{ background:'none', border:'none',
+            fontSize:22, cursor:'pointer', color:'var(--ink-4)', padding:'4px 10px', minHeight:44 }}>×</button>
         </div>
-
-        <div style={{ padding:'20px 20px', paddingBottom:'max(24px, env(safe-area-inset-bottom, 24px))', overflowY:'auto' }}>
-          {/* Icon */}
-          <div style={{
-            width:68, height:68, borderRadius:16, margin:'0 auto 18px',
-            background: isPDF ? 'var(--red-bg)' : isImage ? 'var(--blue-bg)' : 'var(--sand)',
-            display:'flex', alignItems:'center', justifyContent:'center', fontSize:32,
-          }}>
-            {isPDF ? '📄' : isImage ? '🖼️' : '📁'}
-          </div>
-
-          {/* Meta */}
-          {[
-            { label:'Name',     value: file.name },
-            { label:'Type',     value: isPDF ? 'PDF Document' : isImage ? 'Image' : file.mimeType },
-            { label:'Size',     value: formatSize(file.size) },
-            { label:'Saved on', value: formatDate(file.createdTime) },
-          ].filter(r => r.value).map(row => (
-            <div key={row.label} style={{
-              display:'flex', justifyContent:'space-between', alignItems:'flex-start',
-              padding:'11px 0', borderBottom:'1px solid var(--border-soft)',
-            }}>
-              <span style={{ fontSize:13, color:'var(--ink-4)', minWidth:72 }}>{row.label}</span>
-              <span style={{ fontSize:13, color:'var(--ink-2)', fontWeight:500,
-                textAlign:'right', maxWidth:'65%', wordBreak:'break-all' }}>{row.value}</span>
-            </div>
-          ))}
-
-          {/* Actions */}
-          <div style={{ display:'flex', flexDirection:'column', gap:10, marginTop:22 }}>
-            <ShareButton file={file} getAuthHeader={getAuthHeader} variant="full" />
-
-            {file.webViewLink && (
-              <a href={file.webViewLink} target="_blank" rel="noopener noreferrer"
-                style={{
-                  display:'flex', alignItems:'center', justifyContent:'center',
-                  padding:'13px', borderRadius:13,
-                  border:'1.5px solid var(--border)', background:'white',
-                  color:'var(--ink-2)', textDecoration:'none', fontSize:14,
-                  fontFamily:'var(--font)', fontWeight:500, minHeight:50,
-                  WebkitTapHighlightColor:'transparent',
-                }}>
-                Open in Google Drive ↗
-              </a>
-            )}
-
-            <button onClick={onClose} style={{
-              padding:'12px', borderRadius:13, border:'none', background:'none',
-              fontSize:14, color:'var(--ink-4)', cursor:'pointer',
-              fontFamily:'var(--font)', minHeight:44,
-              WebkitTapHighlightColor:'transparent',
-            }}>Close</button>
-          </div>
-
-          <p style={{ fontSize:11, color:'var(--ink-4)', textAlign:'center',
-            marginTop:10, lineHeight:1.5 }}>
-            On mobile, Share opens WhatsApp, Telegram, AirDrop & more.
-            On desktop, the file downloads directly.
+        <div style={{ padding:'16px 20px 32px' }}>
+          <p style={{ fontSize:12, color:'var(--ink-4)', marginBottom:10 }}>
+            Extension kept automatically.
           </p>
+          <input ref={inputRef} value={val} onChange={e => setVal(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && save()}
+            style={{ width:'100%', padding:'12px 14px', border:'1.5px solid var(--border)',
+              borderRadius:10, fontFamily:'var(--font)', fontSize:16, outline:'none',
+              marginBottom:14, boxSizing:'border-box' }} />
+          {err && <p style={{ fontSize:12, color:'var(--red)', marginBottom:10 }}>⚠ {err}</p>}
+          <div style={{ display:'flex', gap:10 }}>
+            <button onClick={save} disabled={saving} style={{
+              flex:1, padding:'13px', borderRadius:12, background:'var(--accent)',
+              color:'white', border:'none', fontSize:15, fontWeight:600,
+              cursor: saving ? 'default' : 'pointer', fontFamily:'var(--font)', minHeight:50,
+            }}>
+              {saving
+                ? <span className="spin" style={{ display:'inline-block', width:16, height:16,
+                    border:'2px solid rgba(255,255,255,.3)', borderTopColor:'white', borderRadius:'50%' }} />
+                : 'Save'
+              }
+            </button>
+            <button onClick={onClose} style={{
+              flex:1, padding:'13px', borderRadius:12, background:'white',
+              color:'var(--ink-2)', border:'1.5px solid var(--border)',
+              fontSize:15, cursor:'pointer', fontFamily:'var(--font)', minHeight:50,
+            }}>Cancel</button>
+          </div>
         </div>
       </div>
     </>
+  );
+}
+
+// ─── File Viewer Sheet ────────────────────────────────────────────────────────
+function FileViewer({ file: initialFile, getAuthHeader, onClose, onRenamed }) {
+  const [file,        setFile]       = useState(initialFile);
+  const [showRename,  setShowRename] = useState(false);
+  const [viewUrl,     setViewUrl]    = useState(null);
+  const [loadingView, setLoadingView]= useState(false);
+  const isPDF   = file.mimeType === 'application/pdf';
+  const isImage = file.mimeType?.startsWith('image/');
+
+  // Load file for inline viewing
+  useEffect(() => {
+    if (!isPDF && !isImage) return;
+    setLoadingView(true);
+    getAuthHeader().then(h => {
+      fetch(`${BASE}/drive/file/${file.id}/download?filename=${encodeURIComponent(file.name)}`,
+        { headers: { Authorization: h } })
+        .then(r => r.blob())
+        .then(blob => {
+          setViewUrl(URL.createObjectURL(blob));
+          setLoadingView(false);
+        })
+        .catch(() => setLoadingView(false));
+    });
+    return () => { if (viewUrl) URL.revokeObjectURL(viewUrl); };
+  }, [file.id]);
+
+  function handleRenamed(updated) {
+    setFile(f => ({ ...f, name: updated.name }));
+    onRenamed?.(updated);
+    setShowRename(false);
+  }
+
+  return (
+    <>
+      <div className="sheet-backdrop" onClick={onClose} />
+      <div className="sheet" style={{ maxHeight:'96dvh', maxHeight:'96vh' }}>
+        <div className="sheet-handle" />
+        {/* Header */}
+        <div style={{ display:'flex', alignItems:'center', gap:8, padding:'12px 16px',
+          borderBottom:'1px solid var(--border-soft)', position:'sticky', top:0, background:'white', zIndex:2 }}>
+          <button onClick={onClose} style={{ background:'none', border:'none',
+            fontSize:20, cursor:'pointer', color:'var(--ink-4)', padding:'4px 8px',
+            minHeight:44, minWidth:44, WebkitTapHighlightColor:'transparent' }}>‹</button>
+          <span style={{ flex:1, fontWeight:600, fontSize:14, overflow:'hidden',
+            textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{file.name}</span>
+          <button onClick={() => setShowRename(true)} style={{
+            background:'var(--sand)', border:'none', borderRadius:8,
+            padding:'6px 12px', fontSize:13, cursor:'pointer', fontFamily:'var(--font)',
+            minHeight:36, WebkitTapHighlightColor:'transparent',
+          }}>✏️ Rename</button>
+        </div>
+
+        {/* Viewer area */}
+        <div style={{ padding:'0', flex:1, overflow:'hidden', minHeight:300, background:'var(--paper)' }}>
+          {loadingView && (
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'center',
+              height:280, flexDirection:'column', gap:12 }}>
+              <div className="spin" style={{ width:32, height:32,
+                border:'2px solid var(--sand)', borderTopColor:'var(--accent)', borderRadius:'50%' }} />
+              <p style={{ fontSize:13, color:'var(--ink-4)' }}>Loading…</p>
+            </div>
+          )}
+          {!loadingView && viewUrl && isPDF && (
+            <iframe
+              src={viewUrl}
+              title={file.name}
+              style={{ width:'100%', height:'55vh', border:'none', display:'block' }}
+            />
+          )}
+          {!loadingView && viewUrl && isImage && (
+            <div style={{ padding:12, display:'flex', alignItems:'center', justifyContent:'center',
+              background:'#111', minHeight:280 }}>
+              <img src={viewUrl} alt={file.name}
+                style={{ maxWidth:'100%', maxHeight:'55vh', objectFit:'contain', borderRadius:6,
+                  boxShadow:'0 4px 20px rgba(0,0,0,.5)' }} />
+            </div>
+          )}
+          {!loadingView && !viewUrl && !isPDF && !isImage && (
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'center',
+              height:200, flexDirection:'column', gap:10 }}>
+              <span style={{ fontSize:48 }}>📁</span>
+              <p style={{ fontSize:13, color:'var(--ink-4)' }}>Preview not available</p>
+            </div>
+          )}
+        </div>
+
+        {/* Actions */}
+        <div style={{ padding:'14px 16px',
+          paddingBottom:'max(16px, env(safe-area-inset-bottom, 16px))',
+          borderTop:'1px solid var(--border-soft)', background:'white' }}>
+          <div style={{ marginBottom:10 }}>
+            <p style={{ fontSize:12, color:'var(--ink-3)', marginBottom:4 }}>
+              {formatSize(file.size)} · {formatDate(file.createdTime)}
+            </p>
+          </div>
+          <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+            <ShareButton file={file} getAuthHeader={getAuthHeader} variant="full" />
+            {file.webViewLink && (
+              <a href={file.webViewLink} target="_blank" rel="noopener noreferrer"
+                style={{ display:'flex', alignItems:'center', justifyContent:'center',
+                  padding:'12px', borderRadius:12, border:'1.5px solid var(--border)',
+                  background:'white', color:'var(--ink-2)', textDecoration:'none',
+                  fontSize:14, fontFamily:'var(--font)', fontWeight:500, minHeight:46 }}>
+                Open in Drive ↗
+              </a>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {showRename && (
+        <RenameSheet file={file} getAuthHeader={getAuthHeader}
+          onRenamed={handleRenamed} onClose={() => setShowRename(false)} />
+      )}
+    </>
+  );
+}
+
+// ─── Folder Row — lazy loads files with infinite scroll ───────────────────────
+function FolderSection({ folder, getAuthHeader, searchQuery }) {
+  const [open,        setOpen]       = useState(false);
+  const [files,       setFiles]      = useState([]);
+  const [loading,     setLoading]    = useState(false);
+  const [nextToken,   setNextToken]  = useState(null);
+  const [hasMore,     setHasMore]    = useState(true);
+  const [loadingMore, setLoadingMore]= useState(false);
+  const [viewFile,    setViewFile]   = useState(null);
+  const sentinelRef = useRef(null);
+  const PAGE_SIZE = 10;
+
+  // Load first page when opened
+  async function loadFirstPage() {
+    if (loading) return;
+    setLoading(true);
+
+    // Try cache first
+    const cached = cache.getFolderFiles(folder.id, 0);
+    if (cached && !searchQuery) {
+      setFiles(cached.files);
+      setNextToken(cached.nextToken);
+      setHasMore(!!cached.nextToken);
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const h = await getAuthHeader();
+      const params = new URLSearchParams({ folderId: folder.id, pageSize: PAGE_SIZE });
+      if (searchQuery) params.set('search', searchQuery);
+      const { data } = await axios.get(`${BASE}/drive/folder-files?${params}`,
+        { headers: { Authorization: h } });
+
+      const filteredFiles = searchQuery
+        ? (data.files || []).filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase()))
+        : (data.files || []);
+
+      setFiles(filteredFiles);
+      setNextToken(data.nextPageToken || null);
+      setHasMore(!!data.nextPageToken);
+      if (!searchQuery) cache.setFolderFiles(folder.id, 0, { files: filteredFiles, nextToken: data.nextPageToken });
+    } catch (e) {
+      console.error('Load folder files:', e.message);
+    } finally { setLoading(false); }
+  }
+
+  async function loadMore() {
+    if (!hasMore || loadingMore || !nextToken) return;
+    setLoadingMore(true);
+    try {
+      const h = await getAuthHeader();
+      const params = new URLSearchParams({ folderId: folder.id, pageSize: PAGE_SIZE, pageToken: nextToken });
+      const { data } = await axios.get(`${BASE}/drive/folder-files?${params}`,
+        { headers: { Authorization: h } });
+      const more = data.files || [];
+      setFiles(prev => [...prev, ...more]);
+      setNextToken(data.nextPageToken || null);
+      setHasMore(!!data.nextPageToken);
+    } catch (e) { console.error('Load more:', e.message); }
+    finally { setLoadingMore(false); }
+  }
+
+  // Infinite scroll observer
+  useEffect(() => {
+    if (!open || !sentinelRef.current) return;
+    const obs = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting && hasMore && !loadingMore) loadMore();
+    }, { threshold: 0.1 });
+    obs.observe(sentinelRef.current);
+    return () => obs.disconnect();
+  }, [open, hasMore, loadingMore, nextToken]);
+
+  function handleOpen() {
+    const willOpen = !open;
+    setOpen(willOpen);
+    if (willOpen && files.length === 0) loadFirstPage();
+  }
+
+  function handleRenamed(updated) {
+    setFiles(prev => prev.map(f => f.id === updated.id ? { ...f, name: updated.name } : f));
+    cache.invalidateFolderFiles(folder.id);
+  }
+
+  const meta = getFolderMeta(folder.name);
+
+  return (
+    <div style={{ marginBottom:12 }}>
+      {/* Folder header — tap to expand */}
+      <div
+        onClick={handleOpen}
+        style={{
+          display:'flex', alignItems:'center', gap:12, padding:'14px 14px',
+          background:'white', borderRadius: open ? '14px 14px 0 0' : 14,
+          border:'1.5px solid var(--border-soft)', cursor:'pointer',
+          WebkitTapHighlightColor:'transparent',
+          transition:'border-radius .2s',
+        }}>
+        <div style={{ width:40, height:40, minWidth:40, borderRadius:10,
+          background:meta.bg, display:'flex', alignItems:'center',
+          justifyContent:'center', fontSize:20 }}>{meta.icon}</div>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontWeight:600, fontSize:14, color:'var(--ink)' }}>{folder.name}</div>
+          <div style={{ fontSize:11, color:'var(--ink-4)' }}>DocVault/{folder.path}</div>
+        </div>
+        <span style={{
+          fontSize:18, color:'var(--ink-4)', transition:'transform .2s',
+          display:'inline-block', transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
+        }}>›</span>
+      </div>
+
+      {/* Files list — shown when open */}
+      {open && (
+        <div style={{ background:'var(--paper)', border:'1.5px solid var(--border-soft)',
+          borderTop:'none', borderRadius:'0 0 14px 14px', padding:'8px 8px 4px',
+          animation:'fadeIn .2s ease' }}>
+
+          {/* Skeleton loading */}
+          {loading && [0,1,2].map(i => <SkeletonCard key={i} />)}
+
+          {!loading && files.length === 0 && (
+            <p style={{ fontSize:13, color:'var(--ink-4)', textAlign:'center',
+              padding:'20px 0' }}>No files in this folder.</p>
+          )}
+
+          {!loading && files.map(file => (
+            <FileCard
+              key={file.id}
+              file={file}
+              getAuthHeader={getAuthHeader}
+              onTap={() => setViewFile(file)}
+            />
+          ))}
+
+          {/* Load more skeletons */}
+          {loadingMore && [0,1].map(i => <SkeletonCard key={`more-${i}`} />)}
+
+          {/* Infinite scroll sentinel */}
+          {hasMore && <div ref={sentinelRef} style={{ height:1 }} />}
+
+          {!hasMore && files.length > 0 && (
+            <p style={{ fontSize:11, color:'var(--ink-4)', textAlign:'center',
+              padding:'8px 0 6px' }}>All {files.length} files loaded</p>
+          )}
+        </div>
+      )}
+
+      {/* File viewer */}
+      {viewFile && (
+        <FileViewer
+          file={viewFile}
+          getAuthHeader={getAuthHeader}
+          onClose={() => setViewFile(null)}
+          onRenamed={handleRenamed}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Individual file card with thumbnail ──────────────────────────────────────
+function FileCard({ file, getAuthHeader, onTap }) {
+  return (
+    <div
+      onClick={onTap}
+      style={{ display:'flex', gap:10, padding:'10px 8px', background:'white',
+        borderRadius:12, border:'1px solid var(--border-soft)', marginBottom:6,
+        cursor:'pointer', WebkitTapHighlightColor:'transparent',
+        transition:'background .1s',
+      }}
+      onTouchStart={e => e.currentTarget.style.background='var(--sand)'}
+      onTouchEnd={e => e.currentTarget.style.background='white'}
+    >
+      <FileThumbnail file={file} getAuthHeader={getAuthHeader} />
+      <div style={{ flex:1, minWidth:0, display:'flex', flexDirection:'column',
+        justifyContent:'center', gap:3 }}>
+        <div style={{ fontSize:13, fontWeight:500, color:'var(--ink)',
+          overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+          {file.name}
+        </div>
+        <div style={{ fontSize:11, color:'var(--ink-4)', display:'flex', gap:8 }}>
+          {file.size && <span>{formatSize(file.size)}</span>}
+          {file.createdTime && <span>{formatDate(file.createdTime)}</span>}
+        </div>
+      </div>
+      <div style={{ display:'flex', alignItems:'center', paddingRight:2 }}>
+        <ShareButton file={file} getAuthHeader={getAuthHeader} variant="pill" />
+      </div>
+    </div>
   );
 }
 
@@ -124,45 +479,58 @@ export default function Dashboard() {
   const { auth, getAuthHeader } = useAuth();
   const navigate = useNavigate();
 
-  const [files,       setFiles]       = useState([]);
-  const [loading,     setLoading]     = useState(true);
-  const [error,       setError]       = useState('');
-  const [search,      setSearch]      = useState('');
-  const [selectedDoc, setSelectedDoc] = useState(null);
-  const [activeTab,   setActiveTab]   = useState('all');
+  const [folders,       setFolders]       = useState([]);
+  const [loadingFolders,setLoadingFolders]= useState(true);
+  const [folderError,   setFolderError]   = useState('');
+  const [search,        setSearch]        = useState('');
+  const [searchActive,  setSearchActive]  = useState(false);
+  const searchTimeout = useRef(null);
 
-  const fetchFiles = useCallback(async (query = '') => {
-    setLoading(true); setError('');
+  const loadFolders = useCallback(async () => {
+    setLoadingFolders(true); setFolderError('');
+
+    // Try cache
+    const cached = cache.getFolders();
+    if (cached) { setFolders(cached); setLoadingFolders(false); }
+
+    // Always refresh in background
     try {
       const h = await getAuthHeader();
-      // /all-files recursively finds ALL files in DocVault — including old uploads
-      const params = query ? `?search=${encodeURIComponent(query)}` : '';
-      const { data } = await axios.get(`${BASE}/drive/all-files${params}`, { headers:{ Authorization:h } });
-      setFiles(data.files || []);
+      const { data } = await axios.get(`${BASE}/drive/folders`,
+        { headers:{ Authorization:h } });
+      const subFolders = (data.folders || []).filter(f => f.path !== '');
+      setFolders(subFolders);
+      cache.setFolders(subFolders);
     } catch (err) {
       const status = err.response?.status;
-      const msg    = err.response?.data?.error || err.message;
-      if (status === 401) {
-        setError('Session expired — sign out and sign in again.');
-      } else if (status === 403) {
-        setError('Permission denied. Sign out and sign in again to grant Drive access.');
-      } else {
-        setError(msg || 'Could not load files.');
+      if (!cached) {
+        if (status === 403) {
+          setFolderError('Permission denied. Sign out and sign in again to refresh access.');
+        } else if (status === 401) {
+          setFolderError('Session expired. Please sign in again.');
+        } else {
+          setFolderError(err.response?.data?.error || 'Could not load folders.');
+        }
       }
-    } finally { setLoading(false); }
+    } finally { setLoadingFolders(false); }
   }, [getAuthHeader]);
 
-  useEffect(() => { fetchFiles(); }, [fetchFiles]);
+  useEffect(() => { loadFolders(); }, [loadFolders]);
 
-  const isFolder   = f => f.mimeType === 'application/vnd.google-apps.folder';
-  const allDocs    = files.filter(f => !isFolder(f));
-  const allFolders = files.filter(f =>  isFolder(f));
-  const sl         = search.toLowerCase();
-  const filteredDocs    = allDocs.filter(f => f.name.toLowerCase().includes(sl));
-  const filteredFolders = allFolders.filter(f => f.name.toLowerCase().includes(sl));
-  const recentDocs = [...allDocs]
-    .sort((a,b) => new Date(b.createdTime) - new Date(a.createdTime))
-    .slice(0, 10);
+  // Debounced search
+  function handleSearch(val) {
+    setSearch(val);
+    clearTimeout(searchTimeout.current);
+    searchTimeout.current = setTimeout(() => {
+      setSearchActive(val.length > 1);
+    }, 300);
+  }
+
+  const displayFolders = searchActive
+    ? folders.filter(f =>
+        f.path.toLowerCase().includes(search.toLowerCase()) ||
+        f.name.toLowerCase().includes(search.toLowerCase()))
+    : folders;
 
   const firstName = auth?.user?.name?.split(' ')[0] || 'My';
 
@@ -171,97 +539,70 @@ export default function Dashboard() {
       <Navbar />
       <main style={{ maxWidth:680, margin:'0 auto' }}>
 
-        {/* Header + search */}
-        <div style={{ padding:'20px 16px 14px', background:'white',
+        {/* Header */}
+        <div style={{ padding:'18px 16px 14px', background:'white',
           borderBottom:'1px solid var(--border-soft)' }}>
-          <h1 style={{ fontSize:'clamp(1.2rem,5vw,1.5rem)', marginBottom:2 }}>
-            {firstName}'s Vault
-          </h1>
-          <p style={{ fontSize:13, color:'var(--ink-3)' }}>
-            {loading ? 'Loading…'
-              : `${allDocs.length} doc${allDocs.length!==1?'s':''} · ${allFolders.length} folder${allFolders.length!==1?'s':''}`}
-          </p>
-          <div style={{ position:'relative', marginTop:14 }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
+            <div>
+              <h1 style={{ fontSize:'clamp(1.1rem,5vw,1.4rem)', marginBottom:2 }}>
+                {firstName}'s Vault
+              </h1>
+              <p style={{ fontSize:12, color:'var(--ink-4)' }}>
+                {loadingFolders ? 'Loading…' : `${folders.length} folder${folders.length!==1?'s':''}`}
+              </p>
+            </div>
+            <button onClick={() => { cache.invalidateAll(); loadFolders(); }}
+              style={{ background:'none', border:'1px solid var(--border)', borderRadius:8,
+                padding:'7px 12px', fontSize:12, color:'var(--ink-3)', cursor:'pointer',
+                fontFamily:'var(--font)', minHeight:36 }}>
+              ↻
+            </button>
+          </div>
+          <div style={{ position:'relative' }}>
             <span style={{ position:'absolute', left:12, top:'50%', transform:'translateY(-50%)',
               fontSize:15, color:'var(--ink-4)', pointerEvents:'none' }}>🔍</span>
             <input
-              type="search" placeholder="Search…" value={search}
-              onChange={e => {
-                setSearch(e.target.value);
-              }}
-              onKeyDown={e => {
-                if (e.key === 'Enter') fetchFiles(e.target.value);
-              }}
+              type="search" placeholder="Search folders or files…"
+              value={search} onChange={e => handleSearch(e.target.value)}
               style={{ width:'100%', padding:'10px 14px 10px 38px',
                 border:'1.5px solid var(--border)', borderRadius:10,
                 fontFamily:'var(--font)', fontSize:16, outline:'none',
-                background:'white', color:'var(--ink)', minHeight:44 }}
+                background:'white', color:'var(--ink)', minHeight:44,
+                boxSizing:'border-box' }}
             />
           </div>
         </div>
 
-        {/* Tab bar */}
-        {!loading && !error && files.length > 0 && (
-          <div style={{ display:'flex', background:'white',
-            borderBottom:'1px solid var(--border-soft)',
-            overflowX:'auto', WebkitOverflowScrolling:'touch', scrollbarWidth:'none' }}>
-            {[
-              { key:'all',     label:`All (${allDocs.length})` },
-              { key:'folders', label:`Folders (${allFolders.length})` },
-              { key:'recent',  label:'Recent' },
-            ].map(tab => (
-              <button key={tab.key} onClick={() => setActiveTab(tab.key)} style={{
-                flex:1, padding:'12px 8px', fontSize:13,
-                fontWeight: activeTab===tab.key ? 600 : 400,
-                color: activeTab===tab.key ? 'var(--accent)' : 'var(--ink-3)',
-                background:'none', border:'none', cursor:'pointer',
-                borderBottom:`2px solid ${activeTab===tab.key ? 'var(--accent)' : 'transparent'}`,
-                whiteSpace:'nowrap', fontFamily:'var(--font)',
-                transition:'color .15s', minHeight:44,
-              }}>
-                {tab.label}
-              </button>
-            ))}
-          </div>
-        )}
-
-        <div style={{ padding:'16px' }}>
-
-          {/* Loading */}
-          {loading && (
-            <div style={{ textAlign:'center', padding:'60px 0' }}>
-              <div className="spin" style={{ width:32, height:32, margin:'0 auto 14px',
-                border:'2px solid var(--sand)', borderTopColor:'var(--accent)', borderRadius:'50%' }} />
-              <p style={{ color:'var(--ink-4)', fontSize:14 }}>Loading your vault…</p>
-            </div>
-          )}
+        <div style={{ padding:'14px 14px' }}>
 
           {/* Error */}
-          {!loading && error && (
+          {folderError && (
             <div style={{ background:'var(--red-bg)', border:'1px solid #FFCDD2',
-              borderRadius:14, padding:16, marginBottom:16 }}>
-              <p style={{ color:'var(--red)', fontSize:13, marginBottom:8 }}>⚠ {error}</p>
-              {error.includes('Permission') || error.includes('sign in') ? (
-                <p style={{ fontSize:12, color:'var(--red)', opacity:.8, marginBottom:10, lineHeight:1.5 }}>
-                  Fix: tap Sign out (top right) → sign in again → allow Google Drive permission when prompted.
+              borderRadius:12, padding:'14px 16px', marginBottom:14 }}>
+              <p style={{ color:'var(--red)', fontSize:13, marginBottom: folderError.includes('Permission') ? 8 : 0 }}>
+                ⚠ {folderError}
+              </p>
+              {folderError.includes('Permission') && (
+                <p style={{ fontSize:12, color:'var(--red)', opacity:.8, lineHeight:1.5 }}>
+                  Fix: Sign out (top right) → sign in again → approve Google Drive when prompted.
                 </p>
-              ) : null}
-              <div style={{ display:'flex', gap:8 }}>
-                <button onClick={() => fetchFiles()} style={{
-                  background:'none', border:'1px solid var(--red)', borderRadius:7,
-                  color:'var(--red)', fontSize:12, padding:'6px 12px', cursor:'pointer',
-                  fontFamily:'var(--font)',
-                }}>Retry</button>
-              </div>
+              )}
             </div>
           )}
 
+          {/* Folder skeleton */}
+          {loadingFolders && !folders.length && [0,1,2,3].map(i => (
+            <div key={i} style={{ height:68, borderRadius:14, background:'white',
+              border:'1px solid var(--border-soft)', marginBottom:10,
+              animation:'pulse 1.4s ease infinite' }} />
+          ))}
+
           {/* Empty */}
-          {!loading && !error && files.length === 0 && (
+          {!loadingFolders && !folderError && folders.length === 0 && (
             <div style={{ textAlign:'center', padding:'60px 20px' }}>
-              <div style={{ fontSize:56, marginBottom:16, opacity:.35 }}>🗄️</div>
-              <h2 style={{ marginBottom:10, fontSize:'1.1rem' }}>Your vault is empty</h2>
-              <p style={{ color:'var(--ink-3)', marginBottom:28, fontSize:14, lineHeight:1.6 }}>
+              <div style={{ fontSize:52, marginBottom:14, opacity:.3 }}>🗄️</div>
+              <h2 style={{ marginBottom:10, fontSize:'1.1rem' }}>Vault is empty</h2>
+              <p style={{ color:'var(--ink-3)', marginBottom:24, fontSize:14, lineHeight:1.6 }}>
                 Scan a document or upload a file to get started.
               </p>
               <div style={{ display:'flex', gap:10, justifyContent:'center', flexWrap:'wrap' }}>
@@ -280,129 +621,38 @@ export default function Dashboard() {
           )}
 
           {/* No search results */}
-          {!loading && !error && files.length > 0 && search
-            && filteredDocs.length === 0 && filteredFolders.length === 0 && (
-            <div style={{ textAlign:'center', padding:'48px 20px', color:'var(--ink-4)' }}>
-              <div style={{ fontSize:36, marginBottom:10, opacity:.4 }}>🔍</div>
-              <p style={{ fontSize:14 }}>No results for <strong>"{search}"</strong></p>
-              <button onClick={() => setSearch('')}
+          {!loadingFolders && folders.length > 0 && displayFolders.length === 0 && search && (
+            <div style={{ textAlign:'center', padding:'40px 20px', color:'var(--ink-4)' }}>
+              <div style={{ fontSize:32, marginBottom:10, opacity:.4 }}>🔍</div>
+              <p style={{ fontSize:14 }}>No folders match <strong>"{search}"</strong></p>
+              <button onClick={() => { setSearch(''); setSearchActive(false); }}
                 style={{ marginTop:12, background:'none', border:'none',
                   color:'var(--accent)', cursor:'pointer', fontSize:13, fontFamily:'var(--font)' }}>
-                Clear search
+                Clear
               </button>
             </div>
           )}
 
-          {/* Folders tab */}
-          {!loading && !error && activeTab === 'folders' && (
-            <section>
-              <p className="section-label">Folders in DocVault</p>
-              {filteredFolders.length === 0 && (
-                <p style={{ fontSize:13, color:'var(--ink-4)', textAlign:'center', padding:'24px 0' }}>No folders yet.</p>
-              )}
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
-                {filteredFolders.map(folder => {
-                  const meta = getFolderMeta(folder.name);
-                  return (
-                    <a key={folder.id} href={folder.webViewLink} target="_blank"
-                      rel="noopener noreferrer" style={{ textDecoration:'none' }}>
-                      <div className="card" style={{ padding:'14px 12px',
-                        display:'flex', alignItems:'center', gap:10 }}>
-                        <div style={{ width:38, height:38, minWidth:38, borderRadius:10,
-                          background:meta.bg, display:'flex', alignItems:'center',
-                          justifyContent:'center', fontSize:20 }}>{meta.icon}</div>
-                        <span style={{ fontSize:13, fontWeight:500, color:'var(--ink-2)',
-                          overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                          {folder.name}
-                        </span>
-                      </div>
-                    </a>
-                  );
-                })}
-              </div>
-            </section>
-          )}
+          {/* Folder sections */}
+          {displayFolders.map(folder => (
+            <FolderSection
+              key={folder.id}
+              folder={folder}
+              getAuthHeader={getAuthHeader}
+              searchQuery={searchActive ? search : ''}
+            />
+          ))}
 
-          {/* All / Recent tab */}
-          {!loading && !error && (activeTab === 'all' || activeTab === 'recent') && (() => {
-            const docs = activeTab === 'recent' ? recentDocs
-              : search ? filteredDocs : allDocs;
-            if (docs.length === 0 && !search) return (
-              <p style={{ fontSize:13, color:'var(--ink-4)', textAlign:'center', padding:'24px 0' }}>
-                {activeTab === 'recent' ? 'No recent documents.' : 'No documents yet.'}
-              </p>
-            );
-            return (
-              <section>
-                <div style={{ display:'flex', alignItems:'center',
-                  justifyContent:'space-between', marginBottom:10 }}>
-                  <p className="section-label">
-                    {activeTab==='recent' ? 'Recently uploaded' : `Documents · ${docs.length}`}
-                  </p>
-                  <button onClick={fetchFiles} style={{
-                    background:'none', border:'none', color:'var(--ink-4)',
-                    fontSize:12, cursor:'pointer', fontFamily:'var(--font)', padding:'4px 8px',
-                  }}>↻ Refresh</button>
-                </div>
-                <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-                  {docs.map(file => {
-                    const isPDF   = file.mimeType === 'application/pdf';
-                    const isImage = file.mimeType?.startsWith('image/');
-                    return (
-                      <div key={file.id} className="card fade-in"
-                        style={{ padding:'12px 12px', display:'flex',
-                          alignItems:'center', gap:10 }}>
-                        {/* Icon tap → detail sheet */}
-                        <div onClick={() => setSelectedDoc(file)} style={{
-                          width:42, height:42, minWidth:42, borderRadius:10,
-                          background: isPDF ? 'var(--red-bg)' : isImage ? 'var(--blue-bg)' : 'var(--sand)',
-                          display:'flex', alignItems:'center', justifyContent:'center',
-                          fontSize:20, cursor:'pointer', flexShrink:0,
-                        }}>
-                          {isPDF ? '📄' : isImage ? '🖼️' : '📁'}
-                        </div>
-
-                        {/* Name tap → detail sheet */}
-                        <div style={{ flex:1, minWidth:0, cursor:'pointer' }}
-                          onClick={() => setSelectedDoc(file)}>
-                          <div style={{ fontSize:13, fontWeight:500, overflow:'hidden',
-                            textOverflow:'ellipsis', whiteSpace:'nowrap', marginBottom:2 }}>
-                            {file.name}
-                          </div>
-                          <div style={{ fontSize:11, color:'var(--ink-4)',
-                            display:'flex', gap:8, flexWrap:'wrap' }}>
-                            {file.size && <span>{formatSize(file.size)}</span>}
-                            {file.createdTime && <span>{formatDate(file.createdTime)}</span>}
-                          </div>
-                        </div>
-
-                        {/* Inline share pill */}
-                        <ShareButton file={file} getAuthHeader={getAuthHeader} variant="pill" />
-                      </div>
-                    );
-                  })}
-                </div>
-              </section>
-            );
-          })()}
-
-          <div style={{ height:24 }} />
+          <div style={{ height:20 }} />
         </div>
       </main>
 
       {/* FAB */}
-      <button className="fab" onClick={() => navigate('/scan')} title="Scan document">
-        📷
-      </button>
+      <button className="fab" onClick={() => navigate('/scan')} title="Scan document">📷</button>
 
-      {/* Detail sheet */}
-      {selectedDoc && (
-        <DocSheet
-          file={selectedDoc}
-          getAuthHeader={getAuthHeader}
-          onClose={() => setSelectedDoc(null)}
-        />
-      )}
+      <style>{`
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+      `}</style>
     </div>
   );
 }
