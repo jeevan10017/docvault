@@ -10,18 +10,10 @@ import { BASE } from '../../utils/api';
 import { getSequentialName, confirmUsed, sanitise } from '../../utils/naming';
 import { suggestName } from '../../utils/aiNaming';
 import { perspectiveCrop } from './cropUtils';
+import { applyFilterToDataUrl, buildPDF, loadImg } from './imageProcessing';
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2, 9); }
-
-function loadImg(src) {
-  return new Promise((res, rej) => {
-    const img = new Image();
-    img.onload  = () => res(img);
-    img.onerror = () => rej(new Error('Image load failed'));
-    img.src = src;
-  });
-}
 
 function dataUrlToBlob(dataUrl) {
   const [header, b64] = dataUrl.split(',');
@@ -30,39 +22,6 @@ function dataUrlToBlob(dataUrl) {
   const arr  = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return new Blob([arr], { type: mime });
-}
-
-// ─── Image filters ────────────────────────────────────────────────────────────
-async function applyFilterToDataUrl(dataUrl, filter) {
-  const img = await loadImg(dataUrl);
-  const c   = document.createElement('canvas');
-  c.width   = img.naturalWidth  || img.width;
-  c.height  = img.naturalHeight || img.height;
-  const ctx = c.getContext('2d');
-  ctx.drawImage(img, 0, 0);
-  if (filter === 'original') return c.toDataURL('image/jpeg', 0.98);
-  const id = ctx.getImageData(0, 0, c.width, c.height);
-  const d  = id.data;
-  if (filter === 'bw') {
-    for (let i = 0; i < d.length; i += 4) {
-      const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-      d[i] = d[i+1] = d[i+2] = g;
-    }
-  } else if (filter === 'enhance') {
-    for (let i = 0; i < d.length; i += 4) {
-      d[i]   = Math.min(255,Math.max(0,(d[i]  -128)*1.5+148));
-      d[i+1] = Math.min(255,Math.max(0,(d[i+1]-128)*1.5+148));
-      d[i+2] = Math.min(255,Math.max(0,(d[i+2]-128)*1.5+148));
-    }
-  } else if (filter === 'magic') {
-    for (let i = 0; i < d.length; i += 4) {
-      let g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-      g = g > 190 ? 255 : g < 60 ? 0 : ((g-60)/130)*255;
-      d[i] = d[i+1] = d[i+2] = Math.min(255, g);
-    }
-  }
-  ctx.putImageData(id, 0, 0);
-  return c.toDataURL('image/jpeg', 0.98);
 }
 
 async function rotateCW(dataUrl) {
@@ -75,25 +34,6 @@ async function rotateCW(dataUrl) {
   ctx.translate(H/2, W/2); ctx.rotate(Math.PI/2);
   ctx.drawImage(img, -W/2, -H/2);
   return c.toDataURL('image/jpeg', 0.98);
-}
-
-// ─── Build PDF ────────────────────────────────────────────────────────────────
-async function buildPDF(pages) {
-  const { jsPDF } = await import('jspdf');
-  const PW = 595.28, PH = 841.89, M = 20;
-  const pdf = new jsPDF({ orientation:'portrait', unit:'pt', format:'a4', compress:true });
-  for (let i = 0; i < pages.length; i++) {
-    if (i > 0) pdf.addPage();
-    const dataUrl = pages[i].processed || pages[i].original;
-    const img     = await loadImg(dataUrl);
-    const IW = img.naturalWidth || img.width;
-    const IH = img.naturalHeight || img.height;
-    const scale = Math.min((PW-M*2)/IW, (PH-M*2)/IH);
-    const dw = IW*scale, dh = IH*scale;
-    const fmt = dataUrl.startsWith('data:image/png') ? 'PNG' : 'JPEG';
-    pdf.addImage(dataUrl, fmt, (PW-dw)/2, (PH-dh)/2, dw, dh, undefined, 'NONE');
-  }
-  return pdf.output('blob');
 }
 
 // ─── CropEditor ───────────────────────────────────────────────────────────────
@@ -618,9 +558,17 @@ export default function ScannerPage() {
     setShowCamera(false);
     setCropPending(true);
     setPages(prev => {
-      const newPage = {id, original:dataUrl, processed:dataUrl, filter:'original'};
+      const newPage = {id, original:dataUrl, processed:dataUrl, filter:'document'};
       const next = [...prev, newPage];
-      setTimeout(() => setCropIndex(next.length-1), 30);
+      const idx = next.length - 1;
+      setTimeout(() => setCropIndex(idx), 30);
+      // Apply document filter automatically after a short delay
+      setTimeout(async () => {
+        try {
+          const enhanced = await applyFilterToDataUrl(dataUrl, 'document');
+          setPages(p => p.map((pg, i) => i === idx ? {...pg, processed: enhanced, filter:'document'} : pg));
+        } catch { /* keep original if filter fails */ }
+      }, 200);
       return next;
     });
   }, []);
@@ -673,6 +621,7 @@ export default function ScannerPage() {
         canvas.height = img.naturalHeight||img.height;
         canvas.getContext('2d').drawImage(img,0,0);
         blob = await new Promise(r=>canvas.toBlob(r,q,0.98));
+        // eslint-disable-next-line
         ext = outputFmt==='jpg'?'.jpg':'.png'; mimeType=q;
       }
       let name = docName.trim();
@@ -857,10 +806,11 @@ export default function ScannerPage() {
             scrollbarWidth:'none', flexShrink:0,
           }}>
             {[
-              {id:'original',label:'Original',icon:'📷'},
-              {id:'enhance', label:'Enhance', icon:'✨'},
-              {id:'bw',      label:'B&W',     icon:'⬛'},
-              {id:'magic',   label:'Magic',   icon:'🪄'},
+              {id:'document',label:'Document',icon:'📄'},
+              {id:'original',label:'Original', icon:'📷'},
+              {id:'enhance', label:'Enhance',  icon:'✨'},
+              {id:'bw',      label:'B&W',      icon:'⬛'},
+              {id:'magic',   label:'Magic',    icon:'🪄'},
             ].map(f => (
               <button key={f.id} onClick={()=>applyFilter(selected,f.id)} style={{
                 padding:'6px 13px', borderRadius:99, border:'none', cursor:'pointer',

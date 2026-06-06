@@ -165,30 +165,39 @@ function RenameSheet({ file, getAuthHeader, onRenamed, onClose }) {
 }
 
 // ─── File Viewer Sheet ────────────────────────────────────────────────────────
+// Mobile PDF strategy:
+//   iOS Safari & Android Chrome cannot display PDFs in <iframe> from blob URLs.
+//   We use three layers:
+//   1. Images: shown inline via blob URL (always works)
+//   2. PDFs on desktop: iframe with blob URL
+//   3. PDFs on mobile: open via Google Docs viewer (public files) OR
+//      drive webViewLink (opens in Drive app / browser) OR download
 function FileViewer({ file: initialFile, getAuthHeader, onClose, onRenamed }) {
   const [file,        setFile]       = useState(initialFile);
   const [showRename,  setShowRename] = useState(false);
-  const [viewUrl,     setViewUrl]    = useState(null);
-  const [loadingView, setLoadingView]= useState(false);
+  const [imgUrl,      setImgUrl]     = useState(null);  // for images only
+  const [loadingImg,  setLoadingImg] = useState(false);
   const isPDF   = file.mimeType === 'application/pdf';
   const isImage = file.mimeType?.startsWith('image/');
 
-  // Load file for inline viewing
+  // Detect mobile — PDFs open externally on mobile
+  const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
+  // For images: load blob for inline display
   useEffect(() => {
-    if (!isPDF && !isImage) return;
-    setLoadingView(true);
+    if (!isImage) return;
+    setLoadingImg(true);
     getAuthHeader().then(h => {
-      fetch(`${BASE}/drive/file/${file.id}/download?filename=${encodeURIComponent(file.name)}`,
-        { headers: { Authorization: h } })
+      fetch(
+        `${BASE}/drive/file/${file.id}/download?filename=${encodeURIComponent(file.name)}`,
+        { headers: { Authorization: h } }
+      )
         .then(r => r.blob())
-        .then(blob => {
-          setViewUrl(URL.createObjectURL(blob));
-          setLoadingView(false);
-        })
-        .catch(() => setLoadingView(false));
+        .then(blob => { setImgUrl(URL.createObjectURL(blob)); setLoadingImg(false); })
+        .catch(() => setLoadingImg(false));
     });
-    return () => { if (viewUrl) URL.revokeObjectURL(viewUrl); };
-  }, [file.id]);
+    return () => { if (imgUrl) URL.revokeObjectURL(imgUrl); };
+  }, [file.id, isImage, getAuthHeader]);
 
   function handleRenamed(updated) {
     setFile(f => ({ ...f, name: updated.name }));
@@ -196,56 +205,100 @@ function FileViewer({ file: initialFile, getAuthHeader, onClose, onRenamed }) {
     setShowRename(false);
   }
 
+  // Open PDF in best available viewer
+  function openPDF() {
+    if (file.webViewLink) {
+      window.open(file.webViewLink, '_blank', 'noopener,noreferrer');
+    }
+  }
+
   return (
     <>
       <div className="sheet-backdrop" onClick={onClose} />
       <div className="sheet" style={{ maxHeight:'96dvh', Height:'96vh' }}>
         <div className="sheet-handle" />
+
         {/* Header */}
-        <div style={{ display:'flex', alignItems:'center', gap:8, padding:'12px 16px',
-          borderBottom:'1px solid var(--border-soft)', position:'sticky', top:0, background:'white', zIndex:2 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, padding:'11px 14px',
+          borderBottom:'1px solid var(--border-soft)',
+          position:'sticky', top:0, background:'white', zIndex:2 }}>
           <button onClick={onClose} style={{ background:'none', border:'none',
-            fontSize:20, cursor:'pointer', color:'var(--ink-4)', padding:'4px 8px',
-            minHeight:44, minWidth:44, WebkitTapHighlightColor:'transparent' }}>‹</button>
+            fontSize:22, cursor:'pointer', color:'var(--ink-4)',
+            padding:'4px 6px', minHeight:44, minWidth:44,
+            WebkitTapHighlightColor:'transparent', lineHeight:1 }}>‹</button>
           <span style={{ flex:1, fontWeight:600, fontSize:14, overflow:'hidden',
             textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{file.name}</span>
           <button onClick={() => setShowRename(true)} style={{
             background:'var(--sand)', border:'none', borderRadius:8,
-            padding:'6px 12px', fontSize:13, cursor:'pointer', fontFamily:'var(--font)',
-            minHeight:36, WebkitTapHighlightColor:'transparent',
-          }}>✏️ Rename</button>
+            padding:'7px 12px', fontSize:13, cursor:'pointer', fontFamily:'var(--font)',
+            minHeight:38, WebkitTapHighlightColor:'transparent', flexShrink:0,
+          }}>✏️</button>
         </div>
 
-        {/* Viewer area */}
-        <div style={{ padding:'0', flex:1, overflow:'hidden', minHeight:300, background:'var(--paper)' }}>
-          {loadingView && (
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'center',
-              height:280, flexDirection:'column', gap:12 }}>
-              <div className="spin" style={{ width:32, height:32,
-                border:'2px solid var(--sand)', borderTopColor:'var(--accent)', borderRadius:'50%' }} />
-              <p style={{ fontSize:13, color:'var(--ink-4)' }}>Loading…</p>
+        {/* Viewer */}
+        <div style={{ background:'var(--paper)' }}>
+
+          {/* ── Image viewer ── */}
+          {isImage && (
+            <div style={{ minHeight:240, display:'flex', alignItems:'center',
+              justifyContent:'center', background:'#111', padding:12 }}>
+              {loadingImg
+                ? (<div style={{ textAlign:'center', padding:'40px 0' }}>
+                    <div className="spin" style={{ width:28,height:28,margin:'0 auto 10px',
+                      border:'2px solid rgba(255,255,255,.15)',borderTopColor:'white',borderRadius:'50%'}}/>
+                    <p style={{color:'rgba(255,255,255,.4)',fontSize:13,fontFamily:'var(--font)'}}>Loading…</p>
+                  </div>)
+                : imgUrl
+                  ? (<img src={imgUrl} alt={file.name}
+                      style={{maxWidth:'100%',maxHeight:'60vh',objectFit:'contain',
+                        borderRadius:6,boxShadow:'0 4px 20px rgba(0,0,0,.6)'}}/>)
+                  : (<div style={{textAlign:'center',padding:'40px 0'}}>
+                      <span style={{fontSize:40,opacity:.4}}>🖼️</span>
+                      <p style={{color:'rgba(255,255,255,.4)',fontSize:13,marginTop:10,fontFamily:'var(--font)'}}>
+                        Could not load image
+                      </p>
+                    </div>)
+              }
             </div>
           )}
-          {!loadingView && viewUrl && isPDF && (
-            <iframe
-              src={viewUrl}
-              title={file.name}
-              style={{ width:'100%', height:'55vh', border:'none', display:'block' }}
-            />
-          )}
-          {!loadingView && viewUrl && isImage && (
-            <div style={{ padding:12, display:'flex', alignItems:'center', justifyContent:'center',
-              background:'#111', minHeight:280 }}>
-              <img src={viewUrl} alt={file.name}
-                style={{ maxWidth:'100%', maxHeight:'55vh', objectFit:'contain', borderRadius:6,
-                  boxShadow:'0 4px 20px rgba(0,0,0,.5)' }} />
+
+          {/* ── PDF viewer ── */}
+          {isPDF && (
+            <div style={{ padding:'20px 16px', textAlign:'center' }}>
+              <div style={{ fontSize:52, marginBottom:12 }}>📄</div>
+              <p style={{ fontSize:14, fontWeight:600, color:'var(--ink)', marginBottom:6 }}>
+                {file.name}
+              </p>
+              <p style={{ fontSize:12, color:'var(--ink-4)', marginBottom:20 }}>
+                {formatSize(file.size)}
+                {file.createdTime ? ' · ' + formatDate(file.createdTime) : ''}
+              </p>
+              {/* Primary: Open in Drive / browser PDF viewer */}
+              {file.webViewLink && (
+                <button onClick={openPDF} style={{
+                  width:'100%', padding:'13px', borderRadius:12,
+                  background:'var(--accent)', color:'white', border:'none',
+                  fontSize:14, fontWeight:600, cursor:'pointer',
+                  fontFamily:'var(--font)', minHeight:48, marginBottom:10,
+                  display:'flex', alignItems:'center', justifyContent:'center', gap:8,
+                  WebkitTapHighlightColor:'transparent',
+                }}>
+                  📖 View PDF
+                </button>
+              )}
+              <p style={{ fontSize:11, color:'var(--ink-4)', lineHeight:1.5 }}>
+                {isMobile
+                  ? 'Opens in Google Drive or your PDF viewer app.'
+                  : 'Opens in a new tab.'}
+              </p>
             </div>
           )}
-          {!loadingView && !viewUrl && !isPDF && !isImage && (
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'center',
-              height:200, flexDirection:'column', gap:10 }}>
+
+          {/* ── Unknown file type ── */}
+          {!isPDF && !isImage && (
+            <div style={{ padding:'32px 16px', textAlign:'center' }}>
               <span style={{ fontSize:48 }}>📁</span>
-              <p style={{ fontSize:13, color:'var(--ink-4)' }}>Preview not available</p>
+              <p style={{ fontSize:13, color:'var(--ink-4)', marginTop:12 }}>No preview available</p>
             </div>
           )}
         </div>
@@ -254,11 +307,6 @@ function FileViewer({ file: initialFile, getAuthHeader, onClose, onRenamed }) {
         <div style={{ padding:'14px 16px',
           paddingBottom:'max(16px, env(safe-area-inset-bottom, 16px))',
           borderTop:'1px solid var(--border-soft)', background:'white' }}>
-          <div style={{ marginBottom:10 }}>
-            <p style={{ fontSize:12, color:'var(--ink-3)', marginBottom:4 }}>
-              {formatSize(file.size)} · {formatDate(file.createdTime)}
-            </p>
-          </div>
           <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
             <ShareButton file={file} getAuthHeader={getAuthHeader} variant="full" />
             {file.webViewLink && (
