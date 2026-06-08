@@ -214,28 +214,30 @@ function CropEditor({ page, onDone, onCancel }) {
   return (
     <div style={{position:'fixed',inset:0,background:'#0a0a0a',zIndex:400,
       display:'flex',flexDirection:'column',touchAction:'none',userSelect:'none',WebkitUserSelect:'none'}}>
-      {/* Top bar */}
+      {/* Top bar — kept very compact so image gets maximum space */}
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',
-        padding:'12px 16px',paddingTop:'max(12px,env(safe-area-inset-top,12px))',
-        flexShrink:0,background:'rgba(0,0,0,.75)'}}>
-        <button onClick={onCancel} style={{background:'none',border:'none',color:'rgba(255,255,255,.75)',
-          fontSize:15,cursor:'pointer',padding:'8px 14px',minWidth:72,minHeight:44,fontFamily:'var(--font)',
+        padding:'6px 12px',paddingTop:'max(6px,env(safe-area-inset-top,6px))',
+        flexShrink:0,background:'rgba(0,0,0,.8)',minHeight:44}}>
+        <button onClick={onCancel} style={{background:'none',border:'none',color:'rgba(255,255,255,.7)',
+          fontSize:13,cursor:'pointer',padding:'6px 10px',minWidth:60,minHeight:36,fontFamily:'var(--font)',
           WebkitTapHighlightColor:'transparent'}}>Cancel</button>
-        <span style={{color:'white',fontSize:16,fontWeight:700}}>Adjust Crop</span>
+        <span style={{color:'rgba(255,255,255,.6)',fontSize:11,fontWeight:500,letterSpacing:'.04em'}}>
+          DRAG TO ADJUST
+        </span>
         <button onClick={apply} disabled={applying} style={{
           background:applying?'rgba(204,120,92,.5)':'var(--accent)',border:'none',
-          color:'white',fontSize:15,fontWeight:700,cursor:applying?'default':'pointer',
-          padding:'9px 22px',borderRadius:99,minHeight:44,minWidth:72,fontFamily:'var(--font)',
+          color:'white',fontSize:13,fontWeight:700,cursor:applying?'default':'pointer',
+          padding:'7px 18px',borderRadius:99,minHeight:36,minWidth:60,fontFamily:'var(--font)',
           WebkitTapHighlightColor:'transparent'}}>
           {applying
-            ? <span className="spin" style={{display:'inline-block',width:16,height:16,
+            ? <span className="spin" style={{display:'inline-block',width:14,height:14,
                 border:'2px solid rgba(255,255,255,.3)',borderTopColor:'white',borderRadius:'50%'}}/>
             : 'Done'}
         </button>
       </div>
 
-      {/* Image + SVG */}
-      <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden',padding:12}}>
+      {/* Image + SVG — flex:1 gives this all remaining space */}
+      <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden',padding:6}}>
         <div style={{position:'relative',width:dispSize.w,height:dispSize.h}}>
           <img src={page.processed||page.original} alt="crop"
             style={{width:dispSize.w,height:dispSize.h,display:'block',pointerEvents:'none',userSelect:'none'}}/>
@@ -292,10 +294,10 @@ function CropEditor({ page, onDone, onCancel }) {
           </svg>
         </div>
       </div>
-      <p style={{textAlign:'center',color:'rgba(255,255,255,.35)',fontSize:12,
-        padding:'10px 16px',paddingBottom:'max(16px,env(safe-area-inset-bottom,16px))',
+      <p style={{textAlign:'center',color:'rgba(255,255,255,.25)',fontSize:10,
+        padding:'4px 12px',paddingBottom:'max(6px,env(safe-area-inset-bottom,6px))',
         flexShrink:0,fontFamily:'var(--font)'}}>
-        Drag corners or edges to align with document
+        Corners ↔ Edges to adjust
       </p>
     </div>
   );
@@ -538,7 +540,7 @@ export default function ScannerPage() {
   const [error,       setError]       = useState('');
 
   const addPage = useCallback((original) => {
-    const p = { id:uid(), original, processed:original, filter:'original' };
+    const p = { id:uid(), original, cropped:null, processed:original, filter:'original' };
     setPages(prev => [...prev, p]);
     return p;
   }, []);
@@ -558,26 +560,31 @@ export default function ScannerPage() {
     setShowCamera(false);
     setCropPending(true);
     setPages(prev => {
-      const newPage = {id, original:dataUrl, processed:dataUrl, filter:'document'};
+      // Default 'original' — user picks filter themselves after crop
+      const newPage = {id, original:dataUrl, cropped:null, processed:dataUrl, filter:'original'};
       const next = [...prev, newPage];
       const idx = next.length - 1;
       setTimeout(() => setCropIndex(idx), 30);
-      // Apply document filter automatically after a short delay
-      setTimeout(async () => {
-        try {
-          const enhanced = await applyFilterToDataUrl(dataUrl, 'document');
-          setPages(p => p.map((pg, i) => i === idx ? {...pg, processed: enhanced, filter:'document'} : pg));
-        } catch { /* keep original if filter fails */ }
-      }, 200);
       return next;
     });
   }, []);
 
-  const applyCrop = useCallback((idx, croppedUrl) => {
-    setPages(prev => prev.map((p,i) => i===idx ? {...p, processed:croppedUrl} : p));
+  const applyCrop = useCallback(async (idx, croppedUrl) => {
+    // Save the cropped result. Then re-apply the current filter on top of it.
+    // This ensures: crop is preserved, filter works from cropped base.
+    const page = pages[idx];
+    let processed = croppedUrl;
+    if (page.filter && page.filter !== 'original') {
+      try {
+        processed = await applyFilterToDataUrl(croppedUrl, page.filter);
+      } catch { /* keep cropped if filter fails */ }
+    }
+    setPages(prev => prev.map((p,i) =>
+      i===idx ? {...p, cropped:croppedUrl, processed, filter: page.filter || 'original'} : p
+    ));
     setCropIndex(null);
     setCropPending(false);
-  }, []);
+  }, [pages]);
 
   const deletePage = useCallback((idx) => {
     setPages(prev => prev.filter((_,i)=>i!==idx));
@@ -587,13 +594,23 @@ export default function ScannerPage() {
 
   const applyFilter = useCallback(async (idx, filter) => {
     const page = pages[idx];
-    const result = await applyFilterToDataUrl(page.original, filter);
-    setPages(prev => prev.map((p,i) => i===idx ? {...p, processed:result, filter} : p));
+    // Always apply filter to 'cropped' if crop was done, else 'original'
+    // This preserves the crop when switching filters
+    const base = page.cropped || page.original;
+    try {
+      const result = await applyFilterToDataUrl(base, filter);
+      setPages(prev => prev.map((p,i) => i===idx ? {...p, processed:result, filter} : p));
+    } catch (err) {
+      console.error('applyFilter error:', err.message);
+      // Graceful fallback — don't crash, just keep current processed
+    }
   }, [pages]);
 
   const rotate = useCallback(async (idx) => {
-    const result = await rotateCW(pages[idx].processed);
-    setPages(prev => prev.map((p,i) => i===idx ? {...p, processed:result} : p));
+    try {
+      const result = await rotateCW(pages[idx].processed);
+      setPages(prev => prev.map((p,i) => i===idx ? {...p, processed:result} : p));
+    } catch (err) { console.error('rotate error:', err.message); }
   }, [pages]);
 
   const movePage = useCallback((from, dir) => {
@@ -621,7 +638,6 @@ export default function ScannerPage() {
         canvas.height = img.naturalHeight||img.height;
         canvas.getContext('2d').drawImage(img,0,0);
         blob = await new Promise(r=>canvas.toBlob(r,q,0.98));
-        // eslint-disable-next-line
         ext = outputFmt==='jpg'?'.jpg':'.png'; mimeType=q;
       }
       let name = docName.trim();
@@ -806,11 +822,11 @@ export default function ScannerPage() {
             scrollbarWidth:'none', flexShrink:0,
           }}>
             {[
-              {id:'document',label:'Document',icon:'📄'},
               {id:'original',label:'Original', icon:'📷'},
               {id:'enhance', label:'Enhance',  icon:'✨'},
               {id:'bw',      label:'B&W',      icon:'⬛'},
               {id:'magic',   label:'Magic',    icon:'🪄'},
+              {id:'document',label:'Document', icon:'📄'},
             ].map(f => (
               <button key={f.id} onClick={()=>applyFilter(selected,f.id)} style={{
                 padding:'6px 13px', borderRadius:99, border:'none', cursor:'pointer',

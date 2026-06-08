@@ -7,7 +7,7 @@ const { uploadFileToDrive } = require('../services/driveService');
 
 const upload = multer({
   dest: '/tmp/docvault-uploads/',
-  limits: { fileSize: 20 * 1024 * 1024 },
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB — large enough for any scan
   fileFilter: (req, file, cb) => {
     const allowed = ['image/jpeg','image/png','image/webp','image/heic','application/pdf'];
     allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error(`Unsupported type: ${file.mimetype}`));
