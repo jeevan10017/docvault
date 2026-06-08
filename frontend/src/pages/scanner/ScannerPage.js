@@ -638,6 +638,7 @@ export default function ScannerPage() {
         canvas.height = img.naturalHeight||img.height;
         canvas.getContext('2d').drawImage(img,0,0);
         blob = await new Promise(r=>canvas.toBlob(r,q,0.98));
+         // eslint-disable-next-line
         ext = outputFmt==='jpg'?'.jpg':'.png'; mimeType=q;
       }
       let name = docName.trim();
